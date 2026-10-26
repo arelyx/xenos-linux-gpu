@@ -76,6 +76,10 @@ docs/                setup, hardware rules, methodology, footguns, conformance, 
 
 Built on Free60 (kernel patch, libxenon, Xell), the Xenia emulator's register and ISA documentation (src/xenia/gpu), Mesa's freedreno a2xx driver, Khronos VK-GL-CTS, and Peer Pressure. The work was done by an AI coding agent (Claude) driving a real console, with a human doing the soldering-iron-free hardware bits and the steering.
 
+## Upstream
+
+Nothing here has been submitted to Free60, Mesa, the X server or Khronos, and that's deliberate: the work hasn't been reviewed by a human who understands it well enough to stand behind it, and unreviewed AI-written patches are a burden on maintainers. Use it, learn from it, but please don't forward these patches upstream on our behalf.
+
 ## License
 
 See [LICENSE.md](LICENSE.md). Kernel code and the libxenon port are GPL-2.0, Mesa patches are MIT like Mesa, the dEQP patch is Apache-2.0 like VK-GL-CTS, docs are CC BY 4.0.

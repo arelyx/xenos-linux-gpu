@@ -1,5 +1,5 @@
 Kernel fixes found while bringing up Linux 6.18 + Free60 xenon0.30 on a Trinity slim, 25 Oct 2026.
-Candidates for https://github.com/Free60Project/linux-kernel-xbox360.
+Kept here only; not submitted to Free60 (see README "Upstream").
 
 0001 sis190 TX wake race      tested on hardware
 0002 Xenon AltiVec            built; tested on hardware (Debian libLLVM loads)
