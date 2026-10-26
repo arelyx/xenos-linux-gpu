@@ -82,5 +82,6 @@ Next:
 
 - Don't re-emit unchanged state; Xenos uploads whole 16-constant blocks and reloads shaders after every resolve.
 - Skip the restore when a draw covers its whole scissor with an opaque copy (the scroll case).
-- Small readbacks: `getimage10` still loses to the CPU (4,000 vs 9,980).
+- Small readbacks: `getimage10` still loses to the CPU (3,790 vs 9,980).
+- Large uploads are near the CPU's limit already: `gltest/bomem` measures about 470 MB/s copying 2000-byte rows into a write-combined buffer (38 MB/s reading one back), so a 500x500 ShmPutImage spends about 2.2 of its 2.5 ms in that copy.
 - Merge glamor's small operations into fewer batches.
