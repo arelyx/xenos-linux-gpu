@@ -2,13 +2,13 @@ Kernel fixes found while bringing up Linux 6.18 + Free60 xenon0.30 on a Trinity 
 Candidates for https://github.com/Free60Project/linux-kernel-xbox360.
 
 0001 sis190 TX wake race      tested on hardware
-0002 Xenon AltiVec            built; boot test pending at time of writing
+0002 Xenon AltiVec            built; tested on hardware (Debian libLLVM loads)
 idle (not a patch yet)        Xenon has no ppc_md.power_save, so idle SMT threads spin at
                               medium priority and take ~45% of the core from their sibling.
                               A power_save that spins at low SMT priority (or 1,1,1) with
                               interrupts enabled until need_resched() gives 1.85x single-thread
                               speed with an idle sibling, no change with both busy. Tested as a
-                              module (xegpu/idle/xenon_idle.c); belongs in platforms/xenon/setup.c.
+                              module (kernel/xenon_idle/xenon_idle.c); belongs in platforms/xenon/setup.c.
                               Also fixes /proc/stat booking idle time as irq time.
 fence IRQ                     Xenos CP raises RB_INT with the a2xx CP_INTERRUPT opcode 0x40;
                               Xenia's PM4_INTERRUPT 0x54 raises nothing on this hardware.
