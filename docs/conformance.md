@@ -43,7 +43,7 @@ Per-group tables are in `results/`. A case counts as passing if dEQP reports Pas
 
 ## Known failures
 
-After the performance work (`results/full6-report.txt`, 26 October afternoon): 98.3% of executed cases pass, 49 fixed and 5 regressed compared with full3, no hangs. The regressions are four `fbo.render` cases that fail only after other cases have run in the same process (see "What the full dEQP run caught" in [performance.md](performance.md)) and one 512x512 cube texture that ran out of memory. The list below is from `results/full3-report.txt` and still applies:
+After the performance work (`results/full6-report.txt`, 26 October afternoon): 98.3% of executed cases pass, 49 fixed and 5 regressed compared with full3, no hangs. The regressions are four `fbo.render` cases that fail only after other cases have run in the same process (see "What the full dEQP run caught" in [performance.md](performance.md)) and one 512x512 cube texture that ran out of memory. full7 (`results/full7-report.txt`, same evening) fixed the order-dependent cases: the GPU's all-of-DRAM cache invalidate doesn't reliably reach the texture cache, so draws now invalidate exact ranges (hardware rule 14). 98.3% again, 5 fixed against full6 and no hangs. Its two "regressions" are `GL_OUT_OF_MEMORY` from an Xorg we had left running, which held GL buffers in the GPU pool; both pass on a rerun without it. The list below is from `results/full3-report.txt` and still applies:
 
 - Cube maps account for most texture failures: `texture.vertex.cube.*` (45), `texture.mipmap.cube.*` (28), cube cases in `texture.specification` and `texture.filtering`. Probably the cube face layout; cube textures are the one texture kind freedreno doesn't tile.
 - `fbo.render` (36): to investigate.

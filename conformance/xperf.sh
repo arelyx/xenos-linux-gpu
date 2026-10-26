@@ -15,3 +15,5 @@ for t in $tests; do
   echo "$mode $t: $(echo "$r" | sed 's/^ *//' | cut -c1-90)"
 done
 echo "$mode stalls $(cat /sys/module/xegpu/parameters/fence_stalls) timeouts $(cat /sys/module/xegpu/parameters/fence_timeouts)"
+# a leftover Xorg holds GL buffers from the GPU pool (dEQP then fails with GL_OUT_OF_MEMORY)
+[ -n "$KEEP_X" ] || pkill -x Xorg

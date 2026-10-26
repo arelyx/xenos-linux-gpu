@@ -30,6 +30,9 @@ Things that cost us hours. Most are obvious in hindsight.
 - **glamor copies overlapping areas through a temporary pixmap** unless the driver offers `GL_MESA_tile_raster_order`, and treats `glTextureBarrierNV` as cheap. freedreno's barrier was a full flush. Both cost a batch per scroll step until we changed them.
 - **glamor's GLES path asserts little-endian.** See `xorg/glamor-be-gles.patch`, plus two Mesa patches that make `GL_BGRA` + `GL_UNSIGNED_INT_8_8_8_8_REV` legal on big-endian GLES and report it as the implementation read type. Without the second, glamor silently falls back to software for depth 24/32 and still "works".
 
+- **"Invalidate all of DRAM" isn't.** The cache invalidate over all of memory looked like the safe choice and passed every test run on its own. Cases that sampled a CPU-written texture in a recycled buffer then failed only after other cases. Invalidate exact ranges (hardware rule 14).
+- **A whole-GPU wait can hide a cache bug.** Waiting for everything before CPU maps fixed most of those failures, and we spent hours suspecting fence tracking. It worked because the flush put the upload and the draw in separate batches. Sleeping instead of flushing told the two apart in one run.
+
 ## Process
 
 - **`pkill -f <pattern>` matches the shell that runs it** when the pattern appears in the command line. We killed our own SSH session and our own harness this way. Match exact process names (`pkill -x xbox-cycle`) or check `/proc/<pid>/cmdline`.
@@ -40,4 +43,5 @@ Things that cost us hours. Most are obvious in hindsight.
 - **Replay passing doesn't clear a stream.** It clears the stream in replay's state. Twice the real cause was state from earlier work (see methodology).
 - **freedreno's rd dump names files by fence number**, and without "full" it omits buffer contents, so replays fail on missing addresses.
 - **Apt build-dep on the console runs it out of memory** (458 MB). Build in a chroot of the NFS root on the host with qemu-user binfmt.
+- **A leftover Xorg runs dEQP out of GPU memory.** GL buffers come from a 48 MB pool. An Xorg left over from a benchmark kept its share, and big texture cases failed with `GL_OUT_OF_MEMORY`. `xperf.sh` now stops Xorg when it finishes.
 - **The Xbox has 458 MB.** dEQP's ETC1 tests run it out of memory and the console stops answering. They're skipped.

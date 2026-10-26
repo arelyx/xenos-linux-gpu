@@ -89,6 +89,8 @@ Xenos has no `RB_COPY_DEST_OFFSET`. A bin that doesn't start at (0,0) resolves t
 
 libxenon invalidates with `0x01000000`, which only covers the texture cache. With it, the first draw of a process rendered and every later draw used stale vertices. `0x03000000` fixed it (found with an `XENOS_COHER` override on hardware). Mesa invalidates each vertex buffer range before draws and the whole of memory around clears.
 
+The all-of-DRAM form (size `0x20000000`, base 0) doesn't reliably reach the texture cache either. With it before every draw, a cube texture the CPU had written into a recycled buffer sampled stale texels, but only after other dEQP cases had run. Invalidating the texture's exact range fixed it. libxenon only uses the all-of-DRAM form once at init. Mesa now invalidates exact ranges: vertex and index buffers before every draw, textures and restored render targets after the CPU writes them or they get a new buffer.
+
 ### 15. Resolves always write the tiled layout
 
 Every resolve writes the 32x32-macro-tiled layout (`XGAddress2DTiledOffset`), whatever the destination is used for. freedreno's a2xx never enabled tiling, so readbacks came back scrambled. Xenos render targets are always tiled, the CPU (de)tiles on map/unmap, and restores sample with the tiled bit set.

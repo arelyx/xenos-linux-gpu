@@ -1,0 +1,190 @@
+From 18f4fabb3c83c0dd3e57b1295efb4b14729b6395 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 16:52:29 -0700
+Subject: [PATCH] freedreno/xenos: invalidate exact texture ranges instead of
+ all of DRAM
+
+Before every draw Xenos invalidated the GPU caches over all of DRAM, and that
+doesn't reliably reach the texture cache: dEQP uniform_api cases that sample
+a cube map (a linear texture the CPU writes into a recycled BO) sampled
+stale texels after other cases, and four fbo.render cases failed the same
+way. Waiting for the whole GPU before CPU maps only hid it, by splitting
+batches.
+
+Invalidate exact ranges, as libxenon does: vertex and index buffers before
+every draw, a texture or restored render target only when the CPU wrote it
+or it got a new BO since its last invalidate (resolves already invalidate
+their destination). Drop the whole-GPU wait before CPU maps.
+XENOS_FULL_INVAL=1 brings back the all-of-DRAM invalidate per draw.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c | 24 +++++++++++++++++--
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 11 +++++++++
+ .../drivers/freedreno/a2xx/fd2_xenos.h        | 11 +++++++++
+ .../drivers/freedreno/freedreno_resource.c    | 18 ++++----------
+ .../drivers/freedreno/freedreno_resource.h    |  3 +++
+ 5 files changed, 52 insertions(+), 15 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index a8dfba7..919e937 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -82,8 +82,11 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+    OUT_RING(ring, info->index_size ? 0 : draw->start);
+ 
+    if (is_xenos(ctx->screen)) {
+-      fd2_xenos_invalidate_caches(ring);
+-      /* and each vertex buffer exactly, as libxenon does on unlock */
++      /* Invalidate exact ranges, as libxenon does on unlock. The all-of-DRAM
++       * form doesn't reliably reach the texture cache either: a recycled cube
++       * texture BO sampled stale texels after other dEQP cases (26 Oct 2026). */
++      if (fd2_xenos_full_inval())
++         fd2_xenos_invalidate_caches(ring);
+       struct fd_vertex_stateobj *vtx = ctx->vtx.vtx;
+       for (unsigned i = 0; vtx && i < vtx->num_elements; i++) {
+          struct pipe_vertex_buffer *vb = &ctx->vtx.vertexbuf.vb[vtx->pipe[i].vertex_buffer_index];
+@@ -92,6 +95,23 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+             fd2_xenos_invalidate_bo(ring, bo, fd_bo_size(bo));
+          }
+       }
++      if (info->index_size && !info->has_user_indices && info->index.resource) {
++         struct fd_bo *bo = fd_resource(info->index.resource)->bo;
++         fd2_xenos_invalidate_bo(ring, bo, fd_bo_size(bo));
++      }
++      /* textures only after the CPU wrote them or they got a new BO; resolves
++       * flush and invalidate their own destination */
++      for (unsigned s = 0; s < 2; s++) {
++         struct fd_texture_stateobj *tex = &ctx->tex[s ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX];
++         for (unsigned i = 0; i < tex->num_textures; i++) {
++            struct fd_resource *rsc = tex->textures[i] && tex->textures[i]->texture ?
++               fd_resource(tex->textures[i]->texture) : NULL;
++            if (rsc && rsc->xenos_tc_stale) {
++               fd2_xenos_invalidate_bo(ring, rsc->bo, fd_bo_size(rsc->bo));
++               rsc->xenos_tc_stale = false;
++            }
++         }
++      }
+    } else {
+       OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+       OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 45b2456..3f568b8 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -427,6 +427,17 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
++      /* the restore samples the framebuffer: as for textures, invalidate it
++       * exactly if the CPU wrote it (the all-of-DRAM form above doesn't
++       * reliably reach the texture cache) */
++      struct pipe_resource *restored[2] = { pfb->zsbuf.texture, pfb->nr_cbufs ? pfb->cbufs[0].texture : NULL };
++      for (unsigned i = 0; i < 2; i++) {
++         struct fd_resource *rsc = restored[i] ? fd_resource(restored[i]) : NULL;
++         if (rsc && rsc->xenos_tc_stale) {
++            fd2_xenos_invalidate_bo(ring, rsc->bo, fd_bo_size(rsc->bo));
++            rsc->xenos_tc_stale = false;
++         }
++      }
+       fd2_xenos_invalidate_bo(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo,
+                               fd_bo_size(fd_resource(fd2_ctx->solid_vertexbuf)->bo));
+    } else {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index de55885..13b3578 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -134,6 +134,17 @@ fd2_xenos_skip_full_inval(void)
+    return v;
+ }
+ 
++/* experiment hook: the all-of-DRAM invalidate before every draw, as before
++ * draws invalidated exact ranges */
++static inline bool
++fd2_xenos_full_inval(void)
++{
++   static int v = -1;
++   if (v < 0)
++      v = getenv("XENOS_FULL_INVAL") != NULL;
++   return v;
++}
++
+ #define fd2_xenos_invalidate_caches(ring)                                      \
+    do {                                                                        \
+       if (fd2_xenos_skip_full_inval()) break;                                  \
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 69ea167..0ad43e8 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -36,7 +36,6 @@
+ #include "frontend/drm_driver.h"
+ 
+ DEBUG_GET_ONCE_BOOL_OPTION(xenos_debug, "XENOS_DEBUG", false)
+-DEBUG_GET_ONCE_BOOL_OPTION(xenos_map_no_idle, "XENOS_MAP_NO_IDLE", false)
+ 
+ /**
+  * Go through the entire state and see if the resource is bound
+@@ -167,6 +166,7 @@ fd_resource_set_bo(struct fd_resource *rsc, struct fd_bo *bo)
+ 
+    rsc->bo = bo;
+    rsc->seqno = seqno_next_u16(&screen->rsc_seqno);
++   rsc->xenos_tc_stale = true;
+ }
+ 
+ int
+@@ -436,6 +436,7 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
+        rsc->track, shadow, shadow->b.b.reference.count, shadow->track);
+ 
+    SWAP(rsc->bo, shadow->bo);
++   rsc->xenos_tc_stale = true;
+    SWAP(rsc->valid, shadow->valid);
+ 
+    /* swap() doesn't work because you can't typeof() the bitfield. */
+@@ -719,6 +720,9 @@ fd_resource_transfer_unmap(struct pipe_context *pctx,
+    struct fd_resource *rsc = fd_resource(ptrans->resource);
+    struct fd_transfer *trans = fd_transfer(ptrans);
+ 
++   if (ptrans->usage & PIPE_MAP_WRITE)
++      rsc->xenos_tc_stale = true;
++
+    if (trans->xenos_linear) {
+       if (ptrans->usage & PIPE_MAP_WRITE)
+          xenos_tile_copy(rsc, ptrans->level, &ptrans->box, trans->xenos_linear, ptrans->stride, false);
+@@ -842,18 +846,6 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+    if (pending(rsc, !!(usage & PIPE_MAP_WRITE)))
+       flush_resource(ctx, rsc, usage);
+    fd_resource_wait(ctx, rsc, translate_usage(usage));
+-   /* Waiting for the resource's own fences isn't always enough here: with
+-    * only that, ~10 of 44 dEQP texture/uniform cases that pass alone failed
+-    * when run after others (CPU readback or upload of a small tiled
+-    * resource), and they pass after waiting for everything queued. Not
+-    * understood yet; correctness first. XENOS_MAP_NO_IDLE skips it. */
+-   if (!debug_get_option_xenos_map_no_idle()) {
+-      struct pipe_fence_handle *f = NULL;
+-      pctx->flush(pctx, &f, 0);
+-      pctx->screen->fence_finish(pctx->screen, NULL, f, OS_TIMEOUT_INFINITE);
+-      pctx->screen->fence_reference(pctx->screen, &f, NULL);
+-   }
+-
+    if (debug_get_option_xenos_debug())
+       fprintf(stderr, "xenos map %p %s %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
+               util_format_short_name(prsc->format), box->width, box->height, box->x, box->y, level, usage,
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.h b/src/gallium/drivers/freedreno/freedreno_resource.h
+index ba038a3..2d59b1a 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.h
++++ b/src/gallium/drivers/freedreno/freedreno_resource.h
+@@ -113,6 +113,9 @@ struct fd_resource {
+    /* buffer range that has been initialized */
+    struct util_range valid_buffer_range;
+    bool valid;
++   /* Xenos: the CPU wrote the BO, or it is a new (possibly recycled) BO, since
++    * its range was last invalidated in the GPU's texture cache. */
++   bool xenos_tc_stale;
+    struct renderonly_scanout *scanout;
+ 
+    /* reference to the resource holding stencil data for a z32_s8 texture */
+-- 
+2.53.0
+

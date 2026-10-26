@@ -23,7 +23,7 @@ x11perf operations per second, 1280x720, depth 24. "Morning" is after rounds 1 a
 | `-oddtilerect100` | 103,000 | 119,000 | 248,000 | 14,100 |
 | `-scroll500` | 808 | 2,130 | 5,480 | 904 |
 
-Raw output is in `conformance/results/perf/`. The GPU now beats CPU rendering on fills (small and large), text, composites, tiled fills, large copies, scrolls and uploads. It still loses on tiny copies and uploads (each costs a GL batch) and on reading pixels back.
+Raw output is in `conformance/results/perf/`. `conformance/perfcheck.sh` reruns these plus `glrt` and `xorg/xcopytest.c` and compares against `results/perf/baseline.txt`, flagging anything more than 7% slower (about 3.5 minutes; `putimage500` varies by about 8% between runs). The GPU now beats CPU rendering on fills (small and large), text, composites, tiled fills, large copies, scrolls and uploads. It still loses on tiny copies and uploads (each costs a GL batch) and on reading pixels back.
 
 `glrt` (64x64 FBO, one 3-vertex draw, `glFinish`, repeated): 172 µs per batch before, 102 µs after round 2.
 
@@ -46,7 +46,7 @@ Xorg turned out to be CPU-bound in every slow test: its CPU time equalled wall t
 7. **CPU tiling in runs.** The (de)tiling copy moved one texel at a time; texels are contiguous in 16-byte runs (8 for 1-byte texels), so it now copies runs.
 8. **Partial restore and resolve.** Xenos resolves keep their rectangle's x, y in the destination, so with one bin at the origin, only the batch's scissor bounds need restoring and resolving. Correct, but no measurable change on these tests.
 
-Things that didn't matter: the full-memory cache invalidates before draws (`XENOS_SKIP_FULL_INVAL` changed copywinwin10 by 5%), write-combined mapping of GL buffers (+6% on putimage500).
+Things that didn't matter: the full-memory cache invalidates before draws (`XENOS_SKIP_FULL_INVAL` changed copywinwin10 by 5%; they turned out not to work reliably either, see below), write-combined mapping of GL buffers (+6% on putimage500).
 
 ## Round 3: fewer batches
 
@@ -67,11 +67,11 @@ Rounds 1 and 2 made each batch cheaper. Round 3 avoids batches.
 
 ## What the full dEQP run caught
 
-The 1-in-20 sample passed after rounds 3 and 4; the full run (17,165 cases, now about 30 minutes) found five regressions and one hang. After the fixes below, the last full run (full6) passes 98.3% of executed cases with no hangs:
+The 1-in-20 sample passed after rounds 3 and 4; the full run (17,165 cases, now about 30 minutes) found five regressions and one hang. After the fixes below, the last full run (full7) passes 98.3% of executed cases with no hangs:
 
 - **A hang from the release build.** ir2, the a2xx shader compiler, reports shaders it can't handle with `assert`. Round 2 switched to `-Db_ndebug=true`, so a `tmp_array` shader that used to abort the process compiled to garbage and wedged the GPU. ir2's sources now keep their asserts.
 - **Four scissor cases: a freedreno bug.** freedreno stores scissors with inclusive max bounds and handed that struct to the blitter to save. The blitter restores it through `set_scissor_states()`, which expects exclusive bounds, so every scissored blit shrank the application's scissor by one pixel. Upstream only scissors blits when asked to; scissoring every Xenos blit (round 3) exposed it. Fixed by saving exclusive bounds.
-- **Order-dependent failures, not understood.** Some cases pass alone and fail after others in the same process. By blit readback: `fbo.render.color.blend_npot_rbo_bgra_depth_component16` reads 16 wrong rows of its 111x122 framebuffer, and a few `fbo.render.resize` cases come and go. By CPU readback it's worse: about 10 of 44 texture and `uniform_api` cases. Waiting for the whole GPU before a CPU map of a tiled resource fixes most of those (now the default; `XENOS_MAP_NO_IDLE` skips it), which says Mesa's per-buffer fence tracking misses something on Xenos. Blit readback stays on at every size because it fails fewer cases.
+- **Order-dependent failures: stale texture cache.** Some cases passed alone and failed after others in the same process: four `fbo.render` cases, and about 10 texture and `uniform_api` cases when readback went through the CPU. Waiting for the whole GPU before every CPU map hid most of them. We first suspected Mesa's per-buffer fence tracking. An 8-second reproducer (261 `uniform_api` render cases, 5 failing) ruled that out: sleeping 2 ms before the map didn't help, while flushing pending work, with or without waiting, did. Every failing case samples a cube map, a linear texture the CPU writes into a buffer recycled from an earlier case. The cause was the cache invalidate before each draw: the all-of-DRAM form doesn't reliably reach the texture cache. Draws now invalidate exact ranges, as libxenon does: vertex and index buffers every draw, a texture or restored render target only after the CPU wrote it or it got a new buffer (resolves already invalidate their destination). The whole-GPU wait is gone. full7: 98.3%, the four `fbo.render` cases fixed, no hangs. The first version invalidated the whole framebuffer at every restore and made `comppixwin500` 30 times slower; `conformance/perfcheck.sh` caught it.
 - **One flaky case.** `fbo.render.resize.tex2d_bgra` failed in two group runs and passes alone and when its 100-case batch is replayed. Open.
 
 ## Where the time goes now
