@@ -416,6 +416,13 @@ static void xe_pool_gem_free(struct drm_gem_object *gobj)
 	struct drm_gem_dma_object *obj = to_drm_gem_dma_obj(gobj);
 	struct xe_gem_obj *xo = container_of(obj, struct xe_gem_obj, dma);
 
+	/* A buffer user space mapped cached can leave dirty lines behind. Write
+	 * them back and drop them now: evicted later, they would land on whatever
+	 * buffer reuses this memory. */
+	if (obj->map_noncoherent) {
+		unsigned long v = (unsigned long)phys_to_virt(obj->dma_addr);
+		flush_dcache_range(v, v + xo->pool_size);
+	}
 	gen_pool_free(xe_pool, (unsigned long)obj->vaddr, xo->pool_size);
 	drm_gem_object_release(gobj);
 	kfree(xo);
