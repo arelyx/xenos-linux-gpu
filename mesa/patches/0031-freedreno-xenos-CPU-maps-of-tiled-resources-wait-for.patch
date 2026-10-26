@@ -1,0 +1,90 @@
+From adb428b949e575c9e25e9a2b0e485e33d7e9cef4 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 13:42:44 -0700
+Subject: [PATCH 31/31] freedreno/xenos: CPU maps of tiled resources wait for
+ the whole GPU; readback blits at every size
+
+Two order-dependent dEQP problems found by the full run, both not understood:
+- CPU readback/upload of small tiled resources: ~10 of 44 texture and
+  uniform_api cases pass alone and fail after other cases. Waiting for
+  everything queued (flush + fence) before a CPU map fixes most;
+  XENOS_MAP_NO_IDLE skips the wait.
+- readback by blit: blend_npot_rbo_bgra_depth_component16 at 111x122.
+Blit readback fails fewer cases than CPU readback, so it is used at every size
+again (XENOS_READ_BLIT_MIN_PIXELS overrides).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_resource.c | 14 +++++++++++++-
+ src/gallium/drivers/freedreno/freedreno_screen.c   | 13 ++++++++-----
+ 2 files changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 64b5af3..69ea167 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -36,6 +36,7 @@
+ #include "frontend/drm_driver.h"
+ 
+ DEBUG_GET_ONCE_BOOL_OPTION(xenos_debug, "XENOS_DEBUG", false)
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_map_no_idle, "XENOS_MAP_NO_IDLE", false)
+ 
+ /**
+  * Go through the entire state and see if the resource is bound
+@@ -196,7 +197,7 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
+       COND((prsc->usage == PIPE_USAGE_STAGING) &&
+            ((prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) ||
+             /* Xenos readback staging (upload staging stays write-combined;
+-             * small buffers come faster from the suballocated WC heap) */
++             * below 64K the cached BO measured slower for GetImage) */
+             (is_xenos(screen) && !(prsc->bind & PIPE_BIND_SAMPLER_VIEW) &&
+              size >= 65536)),
+            FD_BO_CACHED_COHERENT) |
+@@ -841,6 +842,17 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+    if (pending(rsc, !!(usage & PIPE_MAP_WRITE)))
+       flush_resource(ctx, rsc, usage);
+    fd_resource_wait(ctx, rsc, translate_usage(usage));
++   /* Waiting for the resource's own fences isn't always enough here: with
++    * only that, ~10 of 44 dEQP texture/uniform cases that pass alone failed
++    * when run after others (CPU readback or upload of a small tiled
++    * resource), and they pass after waiting for everything queued. Not
++    * understood yet; correctness first. XENOS_MAP_NO_IDLE skips it. */
++   if (!debug_get_option_xenos_map_no_idle()) {
++      struct pipe_fence_handle *f = NULL;
++      pctx->flush(pctx, &f, 0);
++      pctx->screen->fence_finish(pctx->screen, NULL, f, OS_TIMEOUT_INFINITE);
++      pctx->screen->fence_reference(pctx->screen, &f, NULL);
++   }
+ 
+    if (debug_get_option_xenos_debug())
+       fprintf(stderr, "xenos map %p %s %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 3cd8293..e784dd0 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -448,12 +448,15 @@ fd_init_screen_caps(struct fd_screen *screen)
+     * XENOS_BLIT_MIN_PIXELS sends smaller transfers to the CPU path. */
+    caps->texture_transfer_blit_min_pixels =
+       is_xenos(screen) ? debug_get_num_option("XENOS_BLIT_MIN_PIXELS", 1) : 0;
+-   /* Readback by blit for 128x128 and up only: below that, one dEQP case
+-    * (fbo.render.color.blend_npot_rbo_bgra_depth_component16, 111x122) reads
+-    * 16 wrong rows when it runs after the other fbo.render.color cases, and
+-    * passes alone. Not understood yet. */
++   /* Readback by blit at every size too. Both readback paths have an
++    * unexplained order-dependent dEQP failure: by blit,
++    * fbo.render.color.blend_npot_rbo_bgra_depth_component16 (111x122) reads 16
++    * wrong rows after the other fbo.render.color cases; by CPU, the
++    * texture.filtering.2d.*_clamp_rgb888_npot cases fail after other texture
++    * cases. Blit fails fewer. XENOS_READ_BLIT_MIN_PIXELS sends smaller reads
++    * to the CPU path. */
+    caps->readpixels_blit_min_pixels =
+-      is_xenos(screen) ? debug_get_num_option("XENOS_READ_BLIT_MIN_PIXELS", 128 * 128) : 0;
++      is_xenos(screen) ? debug_get_num_option("XENOS_READ_BLIT_MIN_PIXELS", 1) : 0;
+ 
+    caps->pci_group =
+    caps->pci_bus =
+-- 
+2.53.0
+

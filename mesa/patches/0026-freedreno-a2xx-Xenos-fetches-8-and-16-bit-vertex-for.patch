@@ -1,0 +1,245 @@
+From b29bf9c5b59250b4d166eb90ddd85e38ef86907a Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 12:15:31 -0700
+Subject: [PATCH 26/28] freedreno/a2xx: Xenos fetches 8- and 16-bit vertex
+ formats; read env hooks once
+
+Each vertex attribute has its own fetch constant, so each gets its own endian
+swap: 8in32 for 32-bit components, 8in16 for 16-bit ones, none for bytes.
+That allows k_8_8_8_8, k_16_16 and k_16_16_16_16 (and the 16-bit float ones),
+the vertex formats Xenia lists. glamor's GL_SHORT positions went through
+u_vbuf, which read the VBO back through the write-combined mapping and
+translated it on every draw.
+
+x11perf: rect10 334k -> 2.85M, aa10text 185k -> 811k, aa24text 150k -> 512k,
+oddtilerect100 117k -> 246k, copywinwin10 15k -> 19k. dEQP vertex_arrays,
+draw, attribute_location, default_vertex_attrib: 769/769 pass.
+
+The experiment hooks (XENOS_INTERP, XENOS_FULL_RESOLVE, XENOS_FLUSH_BARRIER,
+XENOS_DEBUG, FD2_DUMP_SHADERS, FD2_DEBUG_FETCH) are read once: getenv per
+draw and per batch showed up in profiles.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  2 ++
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 17 +++++++++----
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.h |  1 +
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c |  7 ++++--
+ .../drivers/freedreno/a2xx/fd2_program.c      |  9 ++++---
+ .../drivers/freedreno/a2xx/fd2_screen.c       | 25 +++++++++++++++----
+ .../drivers/freedreno/freedreno_resource.c    |  6 +++--
+ 7 files changed, 50 insertions(+), 17 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index ad0bd15..c97dbde 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -60,6 +60,8 @@ emit_vertexbufs(struct fd_context *ctx) assert_dt
+       bufs[i].offset = is_xenos(ctx->screen) ? 0 : vb->buffer_offset;
+       bufs[i].size = fd_bo_size(fd_resource(vb->buffer.resource)->bo);
+       bufs[i].prsc = vb->buffer.resource;
++      bufs[i].comp_bits =
++         util_format_get_component_bits(elem->src_format, UTIL_FORMAT_COLORSPACE_RGB, 0);
+    }
+ 
+    // NOTE I believe the 0x78 (or 0x9c in solid_vp) relates to the
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index a7d3e2e..e9a30e3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -30,6 +30,9 @@
+  * think of a good reason to so..
+  */
+ 
++/* experiment hooks, read once (getenv per batch showed in profiles) */
++DEBUG_GET_ONCE_OPTION(xenos_interp, "XENOS_INTERP", NULL)
++
+ bool fd2_xenos;   /* set by fd2_screen_init on Xbox 360 */
+ 
+ /* Pad with type-2 NOPs until the next dword is at (dword offset % 4) == rem.
+@@ -203,10 +206,14 @@ fd2_emit_vertex_bufs(struct fd_ringbuffer *ring, uint32_t val,
+    for (i = 0; i < n; i++) {
+       struct fd_resource *rsc = fd_resource(vbufs[i].prsc);
+       OUT_RELOC(ring, rsc->bo, vbufs[i].offset, 3, 0);
+-      /* low two bits: endian swap. Big-endian hosts write 32-bit attributes
+-       * natively, so fetch them 8in32 (byte-sized formats would need a
+-       * per-element swizzle instead; floats are the common case) */
+-      OUT_RING(ring, vbufs[i].size | (UTIL_ARCH_BIG_ENDIAN ? SQ_TEX_ENDIAN_8IN32 : 0) |
++      /* low two bits: endian swap. A big-endian host writes each component
++       * in its own byte order: swap 32-bit components 8in32, 16-bit ones
++       * 8in16, bytes not at all. Each attribute has its own fetch constant. */
++      uint32_t endian = 0;
++      if (UTIL_ARCH_BIG_ENDIAN)
++         endian = vbufs[i].comp_bits == 16 ? SQ_TEX_ENDIAN_8IN16 :
++                  vbufs[i].comp_bits == 8 ? SQ_TEX_ENDIAN_NONE : SQ_TEX_ENDIAN_8IN32;
++      OUT_RING(ring, vbufs[i].size | endian |
+                      (fd2_xenos ? 0x10000000 : 0));   /* libxenon VERTEX_FETCH sets bit 28 */
+    }
+    for (i = 0; i < pad; i++) {
+@@ -504,7 +511,7 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_INTERPOLATOR_CNTL));
+-   OUT_RING(ring, getenv("XENOS_INTERP") ? strtoul(getenv("XENOS_INTERP"), NULL, 16) : 0xffffffff);
++   OUT_RING(ring, debug_get_option_xenos_interp() ? strtoul(debug_get_option_xenos_interp(), NULL, 16) : 0xffffffff);
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_AA_CONFIG));
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+index 517f79d..ffd46aa 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+@@ -18,6 +18,7 @@ struct fd_ringbuffer;
+ struct fd2_vertex_buf {
+    unsigned offset, size;
+    struct pipe_resource *prsc;
++   unsigned comp_bits;   /* component size of the fetched format (0: 32) */
+ };
+ 
+ void fd2_emit_alu_consts(struct fd_context *ctx, struct fd_ringbuffer *ring,
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 9b1624e..0fcb64e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -26,6 +26,9 @@
+ #include "fd2_util.h"
+ #include "fd2_zsa.h"
+ 
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_full_resolve, "XENOS_FULL_RESOLVE", false)
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_flush_barrier, "XENOS_FLUSH_BARRIER", false)
++
+ static uint32_t
+ fmt2swap(enum pipe_format format)
+ {
+@@ -80,7 +83,7 @@ xenos_scissor_rect(struct fd_batch *batch, const struct pipe_scissor_state *ms,
+ {
+    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
+    *x0 = 0; *y0 = 0; *x1 = pfb->width; *y1 = pfb->height;
+-   if (!getenv("XENOS_FULL_RESOLVE") && ms->minx <= ms->maxx && ms->miny <= ms->maxy) {
++   if (!debug_get_option_xenos_full_resolve() && ms->minx <= ms->maxx && ms->miny <= ms->maxy) {
+       *x0 = MIN2(ms->minx, pfb->width) & ~7u;
+       *y0 = MIN2(ms->miny, pfb->height) & ~7u;
+       *x1 = MIN2(ms->maxx + 1u, (unsigned)pfb->width);
+@@ -911,7 +914,7 @@ fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
+    struct fd_ringbuffer *ring;
+    unsigned rx0, ry0, rx1, ry1;
+ 
+-   if (!batch || getenv("XENOS_FLUSH_BARRIER")) {
++   if (!batch || debug_get_option_xenos_flush_barrier()) {
+       pctx->flush(pctx, NULL, 0);
+       return;
+    }
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 065cb03..fc4db7d 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -27,6 +27,9 @@
+ #include "fd2_util.h"
+ #include "ir2.h"
+ 
++DEBUG_GET_ONCE_OPTION(fd2_dump_shaders, "FD2_DUMP_SHADERS", NULL)
++DEBUG_GET_ONCE_BOOL_OPTION(fd2_debug_fetch, "FD2_DEBUG_FETCH", false)
++
+ static void
+ fd2_shader_state_delete(struct pipe_context *pctx, void *hwcso)
+ {
+@@ -47,9 +50,9 @@ emit(struct fd_ringbuffer *ring, mesa_shader_stage type,
+ 
+    assert(info->sizedwords);
+ 
+-   if (getenv("FD2_DUMP_SHADERS")) {
++   if (debug_get_option_fd2_dump_shaders()) {
+       /* debug: append the shader's little-endian byte image, for cross-arch comparison */
+-      FILE *f = fopen(getenv("FD2_DUMP_SHADERS"), "a");
++      FILE *f = fopen(debug_get_option_fd2_dump_shaders(), "a");
+       if (f) {
+          fprintf(f, "type=%d dwords=%u\n", type, info->sizedwords);
+          const uint8_t *b = (const uint8_t *)info->dwords;
+@@ -181,7 +184,7 @@ patch_fetches(struct fd_context *ctx, struct ir2_shader_info *info,
+       if (instr->opc == VTX_FETCH) {
+          unsigned idx =
+             (instr->vtx.const_index - 20) * 3 + instr->vtx.const_index_sel;
+-         if (getenv("FD2_DEBUG_FETCH")) {
++         if (debug_get_option_fd2_debug_fetch()) {
+             const uint8_t *b = (const uint8_t *)&info->dwords[fi->offset];
+             fprintf(stderr, "patch_fetches %p i=%d off=%d bytes=%02x%02x%02x%02x %02x%02x%02x%02x const_index=%u sel=%u idx=%u\n",
+                     (void *)info, i, fi->offset, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index b846df9..e7570c3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -16,6 +16,21 @@
+ #include "fd2_xenos.h"
+ #include "fd2_util.h"
+ 
++static bool
++xenos_vertex_format_ok(enum pipe_format format)
++{
++   const struct util_format_description *desc = util_format_description(format);
++   unsigned bits = util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0);
++
++   if (bits == 32)
++      return true;
++   for (unsigned i = 1; i < desc->nr_channels; i++)
++      if (desc->channel[i].size != bits)
++         return false;
++   return (bits == 16 && (desc->nr_channels == 2 || desc->nr_channels == 4)) ||
++          (bits == 8 && desc->nr_channels == 4);
++}
++
+ static bool
+ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+                                enum pipe_format format,
+@@ -44,11 +59,11 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+    if ((usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_VERTEX_BUFFER)) &&
+        !util_format_is_srgb(format) && !util_format_is_pure_integer(format) &&
+        fd2_pipe2surface(format).format != FMT_INVALID) {
+-      /* Xenos: one fetch-constant endian swap (8in32) serves every attribute of a
+-       * buffer, so 8- and 16-bit components arrive reordered on a big-endian host;
+-       * only 32-bit-component formats are fetched directly, u_vbuf converts the rest */
+-      if (!is_xenos(fd_screen(pscreen)) ||
+-          util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) == 32)
++      /* Xenos fetches the vertex formats Xenia lists (k_8_8_8_8, k_16_16,
++       * k_16_16_16_16, their float variants and the 32-bit ones), each attribute
++       * with its own endian swap; u_vbuf converts the rest. (glamor's GL_SHORT
++       * positions went through u_vbuf, reading the VBO back from WC memory.) */
++      if (!is_xenos(fd_screen(pscreen)) || xenos_vertex_format_ok(format))
+          retval |= usage & PIPE_BIND_VERTEX_BUFFER;
+       /* the only npot blocksize supported texture format is R32G32B32_FLOAT */
+       if (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 0e978e5..97edfab 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -35,6 +35,8 @@
+ /* XXX this should go away, needed for 'struct winsys_handle' */
+ #include "frontend/drm_driver.h"
+ 
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_debug, "XENOS_DEBUG", false)
++
+ /**
+  * Go through the entire state and see if the resource is bound
+  * anywhere. If it is, mark the relevant state as dirty. This is
+@@ -847,7 +849,7 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+       flush_resource(ctx, rsc, usage);
+    fd_resource_wait(ctx, rsc, translate_usage(usage));
+ 
+-   if (getenv("XENOS_DEBUG"))
++   if (debug_get_option_xenos_debug())
+       fprintf(stderr, "xenos map %p %s %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
+               util_format_short_name(prsc->format), box->width, box->height, box->x, box->y, level, usage,
+               rsc->layout.cpp, fd_resource_pitch(rsc, level));
+@@ -1406,7 +1408,7 @@ get_best_layout(struct fd_screen *screen,
+    /* Xbox 360: a resolve always writes the tiled layout, so anything that can
+     * be rendered to must be tiled, staging and "linear" requests included.
+     * CPU access goes through the CPU (de)tiling transfer path. */
+-   if (getenv("XENOS_DEBUG"))
++   if (debug_get_option_xenos_debug())
+       fprintf(stderr, "xenos layout %s %ux%u bind %x usage %u\n", util_format_short_name(tmpl->format),
+               tmpl->width0, tmpl->height0, tmpl->bind, tmpl->usage);
+    if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
+-- 
+2.53.0
+

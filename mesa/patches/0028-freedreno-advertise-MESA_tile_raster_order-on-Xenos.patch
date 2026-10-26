@@ -1,0 +1,38 @@
+From 701bce279093d6eaf69d70e89610f86fcf31cdf5 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 12:24:50 -0700
+Subject: [PATCH 28/28] freedreno: advertise MESA_tile_raster_order on Xenos
+
+Xenos samples from memory while it renders into EDRAM, and memory changes
+only at resolves between draws, so a copy within one texture reads the
+pre-draw contents in any raster order. glamor then scrolls and copies
+overlapping areas without a temporary pixmap: scroll500 2160 -> 5520,
+copywinwin500 2160 -> 5530.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_screen.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index e56634e..6d5309c 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -404,6 +404,12 @@ fd_init_screen_caps(struct fd_screen *screen)
+    caps->string_marker = true;
+    caps->mixed_color_depth_bits = true;
+    caps->texture_barrier = true;
++   /* Xenos samples textures from memory while it renders into EDRAM, and
++    * memory only changes at a resolve (between draws), so a draw that copies
++    * within one texture reads the pre-draw contents in any raster order.
++    * Advertising MESA_tile_raster_order lets glamor copy overlapping areas
++    * (scrolling) without a temporary pixmap. */
++   caps->tile_raster_order = is_xenos(screen);
+    caps->invalidate_buffer = true;
+    caps->glsl_tess_levels_as_inputs = true;
+    caps->texture_mirror_clamp_to_edge = true;
+-- 
+2.53.0
+

@@ -4,26 +4,26 @@ First pass, 26 October 2026. Everything here was measured on the console with x1
 
 ## Results
 
-x11perf operations per second, 1280x720, depth 24. "Morning" is after the first two rounds below, "now" after the third:
+x11perf operations per second, 1280x720, depth 24. "Morning" is after rounds 1 and 2 below, "now" after rounds 3 and 4:
 
 | test | glamor before | glamor morning | glamor now | no acceleration |
 |---|---:|---:|---:|---:|
-| `-rect10` | 319,000 | 342,000 | 334,000 | 1,670,000 |
-| `-rect500` | 9,550 | 10,100 | 10,100 | 3,090 |
-| `-copywinwin10` | 1,570 | 6,420 | 14,900 | 136,000 |
-| `-copywinwin500` | 808 | 2,130 | 2,170 | 487 |
-| `-putimage10` | 5,580 | 5,710 | 15,800 | 154,000 |
-| `-putimage500` | 29.9 | 167 | 168 | 154 |
-| `-shmput500` | 32.3 | 353 | 391 | 321 |
-| `-getimage10` | | 3,230 | 4,000 | 9,980 |
-| `-getimage500` | | 14.0 | 62.9 | 169 |
-| `-aa10text` | 166,000 | 187,000 | 185,000 | 290,000 |
-| `-aa24text` | 125,000 | 148,000 | 150,000 | 89,100 |
+| `-rect10` | 319,000 | 342,000 | 2,880,000 | 1,670,000 |
+| `-rect500` | 9,550 | 10,100 | 10,200 | 3,090 |
+| `-copywinwin10` | 1,570 | 6,420 | 21,800 | 136,000 |
+| `-copywinwin500` | 808 | 2,130 | 5,480 | 487 |
+| `-putimage10` | 5,580 | 5,710 | 17,800 | 154,000 |
+| `-putimage500` | 29.9 | 167 | 167 | 154 |
+| `-shmput500` | 32.3 | 353 | 395 | 321 |
+| `-getimage10` | | 3,230 | 3,790 | 9,980 |
+| `-getimage500` | | 14.0 | 61.6 | 169 |
+| `-aa10text` | 166,000 | 187,000 | 839,000 | 290,000 |
+| `-aa24text` | 125,000 | 148,000 | 522,000 | 89,100 |
 | `-comppixwin500` | 9,790 | 10,000 | 10,000 | 339 |
-| `-oddtilerect100` | 103,000 | 119,000 | 117,000 | 14,100 |
-| `-scroll500` | 808 | 2,130 | 2,160 | 904 |
+| `-oddtilerect100` | 103,000 | 119,000 | 248,000 | 14,100 |
+| `-scroll500` | 808 | 2,130 | 5,480 | 904 |
 
-Raw output is in `conformance/results/perf/`. The GPU wins big on large fills, composites and tiled fills (30x on `comppixwin500`, 8x on `oddtilerect100`) and beats the CPU on large copies, scrolls and uploads. It still loses on tiny operations and on reading pixels back.
+Raw output is in `conformance/results/perf/`. The GPU now beats CPU rendering on fills (small and large), text, composites, tiled fills, large copies, scrolls and uploads. It still loses on tiny copies and uploads (each costs a GL batch) and on reading pixels back.
 
 `glrt` (64x64 FBO, one 3-vertex draw, `glFinish`, repeated): 172 µs per batch before, 102 µs after round 2.
 
@@ -53,11 +53,26 @@ Things that didn't matter: the full-memory cache invalidates before draws (`XENO
 Rounds 1 and 2 made each batch cheaper. Round 3 avoids batches.
 
 1. **Texture barriers inside the batch.** glamor calls `glTextureBarrierNV` before every copy within one pixmap (window to window on the same screen, for instance), and freedreno implements the barrier as a full flush: restore, draw, resolve, submit, per copy. A Xenos batch renders as a single bin, so its draw stream runs exactly once and in order. The barrier now emits a resolve of the area drawn since the last barrier into the middle of the draw stream and keeps the batch open. Draws already invalidate the texture cache, so later draws sample what earlier ones wrote. copywinwin10 7,550 to 15,200. `XENOS_FLUSH_BARRIER=1` brings back the flush for comparison.
-2. **Blits scissored to their destination.** Texture uploads by blit took 0.6 ms each regardless of size. The blit ran unscissored, so its batch restored and resolved the whole 1280x720 front buffer (3.6 MB each way) for a 10x10 upload, and freedreno flushed the batch after every blit (a workaround for a GLES 3.1 stencil texturing test). Xenos blits now get their destination box as the scissor and skip that flush. With that, a blit beats the CPU path even for 10x10, so every 32-bit transfer goes by blit: putimage10 5,710 to 15,800, putimage100 1,070 to 4,870.
+2. **Blits scissored to their destination.** Texture uploads by blit took 0.6 ms each regardless of size. The blit ran unscissored, so its batch restored and resolved the whole 1280x720 front buffer (3.6 MB each way) for a 10x10 upload, and freedreno flushed the batch after every blit (a workaround for a GLES 3.1 stencil texturing test). Xenos blits now get their destination box as the scissor and skip that flush. With that, a blit beats the CPU path even for 10x10, so every 32-bit upload goes by blit: putimage10 5,710 to 15,800, putimage100 1,070 to 4,870. Readback (`glReadPixels`, GetImage) goes by blit too, with a caveat described under "What the full dEQP run caught".
 3. **Cached readback.** Reading the staging buffer through the uncached mapping ran at about 17 MB/s. Readback staging buffers of 64 KB or more are now mapped cached. xegpu cleans every cached buffer the checker didn't already walk before a submit, and Mesa runs `dcbf` over the mapped level before the CPU reads it (the lines are clean, so nothing gets written back over the GPU's data). getimage500 14 to 63.
 4. **Checker.** It cleans (`dcbst`) cached command buffers instead of flushing them (`dcbf` threw the lines away just before reading them), and range-checks runs of register writes once instead of per register. 17.5 to 10.7 µs per small submit.
 
 `xorg/xcopytest.c` checks the first two against a CPU model: random fills, overlapping and non-overlapping copies and PutImages, in a window and in a pixmap, read back with `XGetImage`. With the barrier turned into a no-op it reports thousands of wrong pixels; with the in-batch barrier it reports none. The dEQP sample showed no regressions after a fix: blitting 16-bit client data through a staging texture broke rgba4444 and rgb565 cases (the 16-bit formats sample wrongly on Xenos), so blits now also require 4-byte client pixels.
+
+## Round 4: what the profiles showed next
+
+1. **16-bit vertex formats.** glamor sends positions as `GL_SHORT`. Xenos advertised only 32-bit vertex formats, because a single 8in32 endian swap was thought to apply to a whole vertex buffer, so `u_vbuf` translated every draw's vertices to float, reading glamor's VBO back through the write-combined mapping. On a2xx each vertex attribute has its own fetch constant, so each gets its own swap: 8in16 for 16-bit components, none for bytes. Xenos now fetches `k_16_16`, `k_16_16_16_16`, `k_8_8_8_8` and the 16-bit float formats directly. rect10 334,000 to 2,850,000 (now faster than the CPU), aa10text 185,000 to 811,000. All 769 dEQP vertex_arrays, draw and attribute cases pass.
+2. **Overlapping copies without a temporary.** glamor copies overlapping areas (scrolling) through a temporary pixmap unless the driver offers `GL_MESA_tile_raster_order`. On Xenos the raster order doesn't matter: a draw reads textures from memory and writes EDRAM, and memory changes only at resolves between draws, so a copy within one texture always reads the old contents. Mesa now advertises the extension on Xenos and ignores the order. scroll500 and copywinwin500 2,160 to 5,520.
+3. **Smaller things the stack samples pointed at.** freedreno built the a20x binning ring for every draw although Xenos never runs it; `getenv` ran per draw and per batch for experiment hooks, and once per resolve built a variable name with `snprintf`; an in-batch resolve marked all state dirty where the set a clear dirties is enough. With the first item, copywinwin10 went from 15,000 to 22,600.
+
+## What the full dEQP run caught
+
+The 1-in-20 sample passed after rounds 3 and 4; the full run (17,165 cases, now about 30 minutes) found five regressions and one hang. After the fixes below, the last full run (full6) passes 98.3% of executed cases with no hangs:
+
+- **A hang from the release build.** ir2, the a2xx shader compiler, reports shaders it can't handle with `assert`. Round 2 switched to `-Db_ndebug=true`, so a `tmp_array` shader that used to abort the process compiled to garbage and wedged the GPU. ir2's sources now keep their asserts.
+- **Four scissor cases: a freedreno bug.** freedreno stores scissors with inclusive max bounds and handed that struct to the blitter to save. The blitter restores it through `set_scissor_states()`, which expects exclusive bounds, so every scissored blit shrank the application's scissor by one pixel. Upstream only scissors blits when asked to; scissoring every Xenos blit (round 3) exposed it. Fixed by saving exclusive bounds.
+- **Order-dependent failures, not understood.** Some cases pass alone and fail after others in the same process. By blit readback: `fbo.render.color.blend_npot_rbo_bgra_depth_component16` reads 16 wrong rows of its 111x122 framebuffer, and a few `fbo.render.resize` cases come and go. By CPU readback it's worse: about 10 of 44 texture and `uniform_api` cases. Waiting for the whole GPU before a CPU map of a tiled resource fixes most of those (now the default; `XENOS_MAP_NO_IDLE` skips it), which says Mesa's per-buffer fence tracking misses something on Xenos. Blit readback stays on at every size because it fails fewer cases.
+- **One flaky case.** `fbo.render.resize.tex2d_bgra` failed in two group runs and passes alone and when its 100-case batch is replayed. Open.
 
 ## Where the time goes now
 

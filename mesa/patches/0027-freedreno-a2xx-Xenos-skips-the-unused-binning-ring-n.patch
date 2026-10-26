@@ -1,0 +1,107 @@
+From 7b6288c0832024ae9b2c5c6c2d54c336fd8a8db2 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 12:20:10 -0700
+Subject: [PATCH 27/28] freedreno/a2xx: Xenos skips the unused binning ring;
+ narrower dirty state after an in-batch resolve; resolve hooks looked up once
+
+copywinwin10 19.1k -> 22.6k, putimage10 17.1k -> 17.9k.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c  | 12 ++++++++----
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c  |  9 ++++++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h | 12 ++++++++++--
+ 3 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index c97dbde..a8dfba7 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -68,7 +68,8 @@ emit_vertexbufs(struct fd_context *ctx) assert_dt
+    // CONST(20,0) (or CONST(26,0) in soliv_vp)
+ 
+    fd2_emit_vertex_bufs(ctx->batch->draw, 0x78, bufs, vtx->num_elements);
+-   fd2_emit_vertex_bufs(ctx->batch->binning, 0x78, bufs, vtx->num_elements);
++   if (!is_xenos(ctx->screen))   /* Xenos never bins: the binning ring is never run */
++      fd2_emit_vertex_bufs(ctx->batch->binning, 0x78, bufs, vtx->num_elements);
+ }
+ 
+ static void
+@@ -178,7 +179,8 @@ fd2_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *pinfo,
+ 
+    fd_blend_tracking(ctx);
+ 
+-   if (fd_binning_enabled)
++   bool binning = fd_binning_enabled && !is_xenos(ctx->screen);
++   if (binning)
+       fd2_emit_state_binning(ctx, ctx->dirty);
+ 
+    fd2_emit_state(ctx, ctx->dirty);
+@@ -212,7 +214,8 @@ fd2_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *pinfo,
+       for (; count + step > 32766; count -= step) {
+          draw.count = MIN2(count, 32766);
+          draw_impl(ctx, pinfo, &draw, ctx->batch->draw, index_offset, false);
+-         draw_impl(ctx, pinfo, &draw, ctx->batch->binning, index_offset, true);
++         if (binning)
++            draw_impl(ctx, pinfo, &draw, ctx->batch->binning, index_offset, true);
+          draw.start += step;
+          ctx->batch->num_vertices += step;
+       }
+@@ -220,7 +223,8 @@ fd2_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *pinfo,
+       ctx->batch->num_vertices = num_vertices;
+    } else {
+       draw_impl(ctx, pinfo, pdraw, ctx->batch->draw, index_offset, false);
+-      draw_impl(ctx, pinfo, pdraw, ctx->batch->binning, index_offset, true);
++      if (binning)
++         draw_impl(ctx, pinfo, pdraw, ctx->batch->binning, index_offset, true);
+    }
+ 
+    fd_context_all_clean(ctx);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 0fcb64e..45b2456 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -990,7 +990,14 @@ fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
+    OUT_RING(ring, xenos_rb_color_info(0));
+ 
+-   fd_context_all_dirty(ctx);
++   /* what the resolve changed, as after a clear (fd2_clear); vertex buffers
++    * (fetch constants 0x78+) and textures are untouched */
++   ctx->dirty |= FD_DIRTY_ZSA | FD_DIRTY_VIEWPORT | FD_DIRTY_RASTERIZER |
++                 FD_DIRTY_SAMPLE_MASK | FD_DIRTY_PROG | FD_DIRTY_CONST |
++                 FD_DIRTY_BLEND | FD_DIRTY_FRAMEBUFFER | FD_DIRTY_SCISSOR;
++   ctx->dirty_shader[MESA_SHADER_VERTEX] |= FD_DIRTY_SHADER_PROG;
++   ctx->dirty_shader[MESA_SHADER_FRAGMENT] |=
++      FD_DIRTY_SHADER_PROG | FD_DIRTY_SHADER_CONST;
+ }
+ 
+ void
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 789fadb..de55885 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -69,8 +69,16 @@ xenos_rb_copy_dest_info(enum pipe_format format)
+    case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; swap = 1; break;
+    default: break;
+    }
+-   /* experiment hook: XENOS_RESOLVE_<FMT>=<endian><swap>, e.g. XENOS_RESOLVE_A8R8G8B8_UNORM=21 */
+-   {
++   /* experiment hook: XENOS_RESOLVE_<FMT>=<endian><swap>, e.g. XENOS_RESOLVE_A8R8G8B8_UNORM=21
++    * (looked up only if some XENOS_RESOLVE_ variable exists: this runs per resolve) */
++   static int hooks = -1;
++   if (hooks < 0) {
++      extern char **environ;
++      hooks = 0;
++      for (char **e = environ; e && *e; e++)
++         hooks |= !strncmp(*e, "XENOS_RESOLVE_", 14);
++   }
++   if (hooks) {
+       char name[64];
+       snprintf(name, sizeof(name), "XENOS_RESOLVE_%s", util_format_name(format) + 12);
+       const char *e = getenv(name);
+-- 
+2.53.0
+

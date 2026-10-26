@@ -1,0 +1,109 @@
+From eb2716ee00db52aafdf6e84ea513575bd944e094 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 12:36:39 -0700
+Subject: [PATCH 29/31] freedreno/a2xx: keep ir2 asserts in release builds
+
+compile_error() and ir2's other checks are asserts. With -Db_ndebug=true a
+shader ir2 can't handle (tmp_array dynamic loop reads) compiled to garbage and
+wedged the GPU, where the debug build aborted the process. A crash is
+recoverable; a Xenos hang needs a power cycle.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2.c          | 6 ++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_assemble.c | 6 ++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_cp.c       | 6 ++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c      | 6 ++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_ra.c       | 6 ++++++
+ 5 files changed, 30 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 3645226..7c36d6e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -8,6 +8,12 @@
+ 
+ #include "ir2_private.h"
+ 
++/* Keep ir2's asserts in release builds: a shader it can't compile then aborts
++ * the process instead of reaching the GPU half-built and wedging it (no reset
++ * on Xenos). compile_error() is an assert too. */
++#undef NDEBUG
++#include <assert.h>   /* after the other headers, which key off NDEBUG */
++
+ static bool
+ scalar_possible(struct ir2_instr *instr)
+ {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index ef175bb..bc94b61 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -8,6 +8,12 @@
+ 
+ #include "ir2_private.h"
+ 
++/* Keep ir2's asserts in release builds: a shader it can't compile then aborts
++ * the process instead of reaching the GPU half-built and wedging it (no reset
++ * on Xenos). compile_error() is an assert too. */
++#undef NDEBUG
++#include <assert.h>   /* after the other headers, which key off NDEBUG */
++
+ static unsigned
+ src_swizzle(struct ir2_context *ctx, struct ir2_src *src, unsigned ncomp)
+ {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+index 930f3b4..735cc71 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+@@ -8,6 +8,12 @@
+ 
+ #include "ir2_private.h"
+ 
++/* Keep ir2's asserts in release builds: a shader it can't compile then aborts
++ * the process instead of reaching the GPU half-built and wedging it (no reset
++ * on Xenos). compile_error() is an assert too. */
++#undef NDEBUG
++#include <assert.h>   /* after the other headers, which key off NDEBUG */
++
+ static bool
+ is_mov(struct ir2_instr *instr)
+ {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index dc57113..4376670 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -12,6 +12,12 @@
+ #include "freedreno_util.h"
+ #include "nir_legacy.h"
+ 
++/* Keep ir2's asserts in release builds: a shader it can't compile then aborts
++ * the process instead of reaching the GPU half-built and wedging it (no reset
++ * on Xenos). compile_error() is an assert too. */
++#undef NDEBUG
++#include <assert.h>   /* after the other headers, which key off NDEBUG */
++
+ static const nir_shader_compiler_options options = {
+    .io_options = nir_io_has_intrinsics,
+    .compact_arrays = true,
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+index 41b1d96..273439e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+@@ -8,6 +8,12 @@
+ 
+ #include "ir2_private.h"
+ 
++/* Keep ir2's asserts in release builds: a shader it can't compile then aborts
++ * the process instead of reaching the GPU half-built and wedging it (no reset
++ * on Xenos). compile_error() is an assert too. */
++#undef NDEBUG
++#include <assert.h>   /* after the other headers, which key off NDEBUG */
++
+ /* if an instruction has side effects, we should never kill it */
+ static bool
+ has_side_effects(struct ir2_instr *instr)
+-- 
+2.53.0
+
