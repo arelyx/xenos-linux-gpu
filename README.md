@@ -15,7 +15,7 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | Kernel | Linux 6.18.58 + Free60 xenon patch, netbooted by Xell, Debian unstable ppc64 on NFS |
 | GPU driver | `xegpu.ko`: CP microcode and ring, fences on interrupts, boot-time contiguous pool, KMS display, msm UAPI subset with a command checker |
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 only |
-| Conformance | dEQP-GLES2 must-pass list (17,165 cases). Last complete sample: 829/859 pass; partial full run before the last two fixes: 14,436 of 14,642 executed cases pass (98.6%). A full run with all fixes is in `conformance/results/` once it finishes |
+| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 98.0% of executed cases pass, no GPU hangs (`conformance/results/full3-report.txt`). Cube maps are most of the remaining failures |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
 | Not done | Performance work (glamor redraws the whole framebuffer per batch), ETC1, cube-map mipmap filtering under dEQP, Vulkan (never) |
 

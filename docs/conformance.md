@@ -22,7 +22,7 @@ Surface: 256x256 pbuffer, config `rgba8888d24s8ms0`, surfaceless EGL. A batch of
 | 1-in-20 sample, little-endian dEQP (invalid) | 859 | 533 pass (62%) |
 | 1-in-20 sample, big-endian dEQP | 859 | 829 pass, 15 fail, 5 hang, 4 crash, 6 not supported (96.5%) |
 | full run before the small-target, GPR and SIGILL fixes (partial) | 14,928 of 17,165 | 14,436 of 14,642 executed pass (98.6%), 286 skipped |
-| full run with all fixes | see `results/` | |
+| full run with all fixes (26 Oct, 10:00) | 17,165 | 16,735 of 17,075 executed pass (98.0%): 16,612 pass, 119 not supported, 4 quality warnings, 323 fail, 17 crash, **0 hangs**, 90 skipped |
 
 Per-group tables are in `results/`. A case counts as passing if dEQP reports Pass, NotSupported, QualityWarning or CompatibilityWarning, as in Khronos submissions.
 
@@ -42,6 +42,13 @@ Per-group tables are in `results/`. A case counts as passing if dEQP reports Pas
 | everything, at first | dEQP built little-endian (`DE_CPU` defaulted to x86_64) |
 
 ## Known failures
+
+From `results/full3-report.txt`:
+
+- Cube maps account for most texture failures: `texture.vertex.cube.*` (45), `texture.mipmap.cube.*` (28), cube cases in `texture.specification` and `texture.filtering`. Probably the cube face layout; cube textures are the one texture kind freedreno doesn't tile.
+- `fbo.render` (36): to investigate.
+- Crashes (17) are shader-compiler aborts on very large shaders (`shaders.indexing ... const_write_dynamic_loop_read`, ir2 runs out of its register array) and three `fbo.completeness` float formats.
+- `state_query.integers.implementation_color_read_*` regressed: we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32, and ES2 doesn't list that type.
 
 - Cube-map filtering at texel boundaries on the first face rendered (`texture.filtering.cube.*`).
 - RGBA4444 textures sample like 565.
