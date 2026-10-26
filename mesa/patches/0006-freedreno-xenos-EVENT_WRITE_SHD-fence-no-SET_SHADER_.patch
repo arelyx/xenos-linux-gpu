@@ -1,0 +1,108 @@
+From 1d707bb8a6da7a453e55c53c35ce5637afa280ef Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 16:13:32 -0700
+Subject: [PATCH 06/22] freedreno/xenos: EVENT_WRITE_SHD fence, no
+ SET_SHADER_BASES / inst-store override, no non-Xenos registers
+ (RB_COLOR_DEST_MASK, 0x2010)
+
+Per Xenia's command processor: Xbox software never uses the address form of
+EVENT_WRITE nor SET_SHADER_BASES, and loads every shader at instruction start 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/freedreno/drm/freedreno_pipe.c            | 11 +++++++++
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  2 +-
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 23 +++++++++++++------
+ 3 files changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/src/freedreno/drm/freedreno_pipe.c b/src/freedreno/drm/freedreno_pipe.c
+index 53b7228..773eceb 100644
+--- a/src/freedreno/drm/freedreno_pipe.c
++++ b/src/freedreno/drm/freedreno_pipe.c
+@@ -8,6 +8,7 @@
+ 
+ #include "freedreno_drmif.h"
+ #include "freedreno_priv.h"
++#include "util/u_endian.h"
+ 
+ /**
+  * priority of zero is highest priority, and higher numeric values are
+@@ -205,6 +206,16 @@ fd_pipe_emit_fence(struct fd_pipe *pipe, struct fd_ringbuffer *ring)
+       OUT_RING(ring, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
+       OUT_RELOC(ring, control_ptr(pipe, fence));   /* ADDR_LO/HI */
+       OUT_RING(ring, fence);
++   } else if (pipe->dev_id.gpu_id == 290) {
++      /* Xbox 360 Xenos: the memory-writing event is EVENT_WRITE_SHD
++       * (initiator, address | endian, value); Xbox software never uses the
++       * address form of EVENT_WRITE. Endian 2 (8in32) so the value lands in
++       * host order on the big-endian CPU. */
++      OUT_PKT3(ring, CP_EVENT_WRITE_SHD, 3);
++      OUT_RING(ring, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
++      OUT_RELOC(ring, (pipe)->control_mem, offsetof(struct fd_pipe_control, fence),
++                UTIL_ARCH_BIG_ENDIAN ? 2 : 0, 0);
++      OUT_RING(ring, fence);
+    } else {
+       OUT_PKT3(ring, CP_EVENT_WRITE, 3);
+       OUT_RING(ring, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 8eae85c..63a0cc0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -137,7 +137,7 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+    if (is_a20x(ctx->screen)) {
+       /* not sure why this is required, but it fixes some hangs */
+       OUT_WFI(ring);
+-   } else {
++   } else if (!is_xenos(ctx->screen)) { /* 0x2010 is not a Xenos register */
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_UNKNOWN_2010));
+       OUT_RING(ring, 0x00000000);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 2171f09..f5967fd 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -489,9 +489,11 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_SAMPLE_POS));
+    OUT_RING(ring, 0x88888888);
+ 
+-   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+-   OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_DEST_MASK));
+-   OUT_RING(ring, 0xffffffff);
++   if (!is_xenos(ctx->screen)) { /* not a Xenos register */
++      OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++      OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_DEST_MASK));
++      OUT_RING(ring, 0xffffffff);
++   }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_DEST_INFO));
+@@ -523,14 +525,21 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+       OUT_RING(ring, 0x00000001);
+    }
+ 
+-   OUT_PKT0(ring, REG_A2XX_SQ_INST_STORE_MANAGMENT, 1);
+-   OUT_RING(ring, 0x00000180);
++   /* Xenos: keep the instruction store layout libxenon's init programs
++    * (SQ_INST_STORE_MANAGMENT 0x00010800); Xbox software never sends
++    * SET_SHADER_BASES and loads every shader at start 0 of its type. */
++   if (!is_xenos(ctx->screen)) {
++      OUT_PKT0(ring, REG_A2XX_SQ_INST_STORE_MANAGMENT, 1);
++      OUT_RING(ring, 0x00000180);
++   }
+ 
+    OUT_PKT3(ring, CP_INVALIDATE_STATE, 1);
+    OUT_RING(ring, 0x00000300);
+ 
+-   OUT_PKT3(ring, CP_SET_SHADER_BASES, 1);
+-   OUT_RING(ring, 0x80000180);
++   if (!is_xenos(ctx->screen)) {
++      OUT_PKT3(ring, CP_SET_SHADER_BASES, 1);
++      OUT_RING(ring, 0x80000180);
++   }
+ 
+    /* not sure what this form of CP_SET_CONSTANT is.. */
+    OUT_PKT3(ring, CP_SET_CONSTANT, 13);
+-- 
+2.53.0
+

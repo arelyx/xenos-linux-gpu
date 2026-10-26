@@ -1,0 +1,88 @@
+From 6000973a3dc308e8489fb92a661468fc91740911 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:40:40 -0700
+Subject: [PATCH 11/22] freedreno/xenos: VS exports its dummy parameter after
+ position (Xenos waits for every allocated export)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_program.c  |  1 +
+ src/gallium/drivers/freedreno/a2xx/fd2_program.h  |  1 +
+ src/gallium/drivers/freedreno/a2xx/ir2_assemble.c |  5 +++--
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c      | 11 +++++++++++
+ 4 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index eb8cc85..a7033c6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -90,6 +90,7 @@ fd2_shader_state_create(struct pipe_context *pctx,
+                 : tgsi_to_nir(cso->tokens, pctx->screen, false);
+    so->type = so->nir->info.stage;
+    so->is_a20x = is_a20x(fd_context(pctx)->screen);
++   so->is_xenos = is_xenos(fd_context(pctx)->screen);
+ 
+    /* TGSI still arrives as IO variables, GLSL is lowered by the state
+     * tracker because we ask for nir_io_has_intrinsics
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index 26abd53..f0976b0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -20,6 +20,7 @@ struct fd2_shader_stateobj {
+    nir_shader *nir;
+    mesa_shader_stage type;
+    bool is_a20x;
++   bool is_xenos;   /* Xbox 360: every allocated VS parameter must be exported */
+ 
+    /* note: using same set of immediates for all variants
+     * it doesn't matter, other than the slightly larger command stream
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index 0ae21d5..4115aae 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -365,7 +365,8 @@ assemble(struct ir2_context *ctx, bool binning)
+    /* vertex shader always needs to allocate at least one parameter
+     * if it will never happen,
+     */
+-   if (ctx->so->type == MESA_SHADER_VERTEX && ctx->f->inputs_count == 0) {
++   if (ctx->so->type == MESA_SHADER_VERTEX && ctx->f->inputs_count == 0 &&
++       !ctx->so->is_xenos) {   /* Xenos: the dummy parameter is really exported, see ir2_nir.c */
+       alloc.buffer_select = SQ_PARAMETER_PIXEL;
+       cfs[num_cf++].alloc = alloc;
+    }
+@@ -474,7 +475,7 @@ assemble(struct ir2_context *ctx, bool binning)
+ 
+          if (buffer == SQ_PARAMETER_PIXEL &&
+              ctx->so->type == MESA_SHADER_VERTEX)
+-            alloc.size = ctx->f->inputs_count - 1;
++            alloc.size = ctx->f->inputs_count ? ctx->f->inputs_count - 1 : 0;   /* Xenos dummy param: 1 */
+ 
+          if (buffer == SQ_POSITION)
+             alloc.size = ctx->so->writes_psize;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 96784ff..dc57113 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -1255,6 +1255,17 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+    if (so->type == MESA_SHADER_VERTEX)
+       extra_position_exports(ctx, binning);
+ 
++   /* Xenos: a VS whose fragment shader reads nothing still gets one parameter
++    * (SQ_PROGRAM_CNTL can't say zero), and the hardware waits for that export
++    * forever if the VS never writes it (GPU hang, 26 Oct 2026). Export the
++    * position there, after the position export, as libxenon's shaders do.
++    */
++   if (so->type == MESA_SHADER_VERTEX && so->is_xenos && ctx->f->inputs_count == 0) {
++      struct ir2_instr *dummy = instr_create_alu(ctx, nir_op_mov, 4);
++      dummy->src[0] = ctx->position;
++      dummy->alu.export = 0;
++   }
++
+    ralloc_free(ctx->nir);
+ 
+    /* kill unused param input */
+-- 
+2.53.0
+

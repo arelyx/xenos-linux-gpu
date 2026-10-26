@@ -1,0 +1,83 @@
+From ec95b58bf5ca64a5c7be3ea6aa5bc12a11cbc5f3 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 09:32:14 -0700
+Subject: [PATCH 22/22] freedreno/xenos: whole-framebuffer bins (no
+ RB_COPY_DEST_OFFSET); big-endian BGRA/8_8_8_8_REV for glamor; rd dumps per
+ device
+
+- Xenos resolves a bin to the destination origin, so partial (scissor-bounded) bins
+  wrote glamor's updates to the top-left; always use the whole framebuffer.
+- GLES on big-endian: GL_UNSIGNED_INT_8_8_8_8_REV is a legal type (with GL_BGRA)
+  and the implementation read type for ARGB/BGRA buffers, so glamor accelerates
+  depth 24/32 instead of falling back to software.
+- rd dump file names carry a device instance number.
+
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/freedreno_gmem.c | 5 ++++-
+ src/mesa/main/framebuffer.c                    | 8 ++++++++
+ src/mesa/main/glformats.c                      | 5 ++++-
+ 3 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_gmem.c b/src/gallium/drivers/freedreno/freedreno_gmem.c
+index d2208e1..7b4fce1 100644
+--- a/src/gallium/drivers/freedreno/freedreno_gmem.c
++++ b/src/gallium/drivers/freedreno/freedreno_gmem.c
+@@ -559,7 +559,10 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
+    /* NOTE: on a6xx, the max-scissor-rect is handled in fd6_gmem, and
+     * we just rely on CP_COND_EXEC to skip bins with no geometry.
+     */
+-   if (no_scis_opt || is_a6xx(screen)) {
++   /* Xenos has no RB_COPY_DEST_OFFSET: a bin starting anywhere but (0,0) would be
++    * resolved to the top-left of the destination (glamor's partial updates all
++    * landed at the origin), so Xenos always renders the whole framebuffer. */
++   if (no_scis_opt || is_a6xx(screen) || is_xenos(screen)) {
+       key->minx = 0;
+       key->miny = 0;
+       key->width = pfb->width;
+diff --git a/src/mesa/main/framebuffer.c b/src/mesa/main/framebuffer.c
+index 594d19b..1cade69 100644
+--- a/src/mesa/main/framebuffer.c
++++ b/src/mesa/main/framebuffer.c
+@@ -42,6 +42,7 @@
+ #include "mtypes.h"
+ #include "fbobject.h"
+ #include "framebuffer.h"
++#include "util/u_endian.h"
+ #include "renderbuffer.h"
+ #include "texobj.h"
+ #include "glformats.h"
+@@ -983,6 +984,13 @@ _mesa_get_color_read_type(struct gl_context *ctx,
+    }
+    else {
+       const mesa_format format = fb->_ColorReadBuffer->Format;
++#if UTIL_ARCH_BIG_ENDIAN
++      /* A8R8G8B8 bytes on a big-endian host are the packed word BGRA/8_8_8_8_REV,
++       * which is what glamor asks for (Xbox 360) */
++      if (format == MESA_FORMAT_A8R8G8B8_UNORM || format == MESA_FORMAT_X8R8G8B8_UNORM ||
++          format == MESA_FORMAT_B8G8R8A8_UNORM || format == MESA_FORMAT_B8G8R8X8_UNORM)
++         return GL_UNSIGNED_INT_8_8_8_8_REV;   /* (any type is converted; this one is glamor's) */
++#endif
+       return _mesa_uncompressed_format_to_type(format);
+    }
+ }
+diff --git a/src/mesa/main/glformats.c b/src/mesa/main/glformats.c
+index 5cdd792..e7fdd5d 100644
+--- a/src/mesa/main/glformats.c
++++ b/src/mesa/main/glformats.c
+@@ -1875,8 +1875,11 @@ valid_texture_type_enum(const struct gl_context *ctx, GLenum type)
+    case GL_UNSIGNED_BYTE_2_3_3_REV:
+    case GL_UNSIGNED_SHORT_5_6_5_REV:
+    case GL_UNSIGNED_INT_8_8_8_8:
+-   case GL_UNSIGNED_INT_8_8_8_8_REV:
+       return _mesa_is_desktop_gl(ctx);
++   case GL_UNSIGNED_INT_8_8_8_8_REV:
++      /* big-endian GLES: legal with GL_BGRA only (checked by the GLES rules),
++       * the one way to name X's ARGB32 words (glamor on the Xbox 360) */
++      return _mesa_is_desktop_gl(ctx) || UTIL_ARCH_BIG_ENDIAN;
+ 
+    case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+    case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+-- 
+2.53.0
+

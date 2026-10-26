@@ -1,0 +1,13 @@
+[Unit]
+Description=Xenos GPU: xegpu module, EDRAM training, GPU scanout display driver
+After=local-fs.target systemd-modules-load.service
+Before=xfce-tty1.service
+ConditionPathExists=/opt/xegpu/xegpu-up.sh
+
+[Service]
+Type=oneshot
+ExecStart=/opt/xegpu/xegpu-up.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

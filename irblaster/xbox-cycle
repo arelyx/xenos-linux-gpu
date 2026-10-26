@@ -1,0 +1,35 @@
+#!/bin/bash
+# Hands-off power cycle of the Xbox 360 into Linux, whatever state it is in.
+#   off (frozen or running Linux/Aurora): Xbox-remote power press (SMC turns it off)
+#   on:  Windows Media Center power press -> power-on reason 0x31 -> patched Peer Pressure boots Xell -> netboot Linux
+# Exit 0 when Linux answers SSH with the GPU module loaded, 1 otherwise. Log: netboot/cycle.log
+# one cycle at a time: two scripts pressing IR buttons at once leave the console in Aurora
+exec 9>/tmp/xbox-cycle.lock; flock 9
+X=$(dirname "$(readlink -f "$0")")/xir
+LOG=${XBOX_CYCLE_LOG:-$HOME/xbox-cycle.log}
+SSH="ssh -o ConnectTimeout=4 -o BatchMode=yes ${XBOX_SSH_OPTS:-} root@${XBOX_HOST:-10.0.0.206}"
+log() { echo "$(date '+%F %T') $*" | tee -a $LOG; }
+alive() { ping -c1 -W1 ${XBOX_HOST:-10.0.0.206} >/dev/null 2>&1 || ping -c1 -W1 ${XBOX_DASH_HOST:-10.0.0.205} >/dev/null 2>&1; }
+for attempt in 1 2 3 4 5; do
+  log "cycle attempt $attempt"
+  if alive || [ "$attempt" -gt 1 ] || [ "${1:-}" = force ]; then
+    # a frozen console stops answering ping, so a press is needed even when nothing answers
+    timeout 5 $SSH sync >/dev/null 2>&1
+    $X p >/dev/null
+    t0=$(date +%s); while alive && [ $(( $(date +%s) - t0 )) -lt 30 ]; do sleep 1; done
+  fi
+  sleep 10
+  if alive; then log "still on after power press, pressing again"; $X p >/dev/null; sleep 12; fi
+  $X mce >/dev/null
+  t0=$(date +%s)
+  while [ $(( $(date +%s) - t0 )) -lt 240 ]; do
+    if timeout 6 $SSH 'systemctl is-active xegpu' 2>/dev/null | grep -qx active; then
+      log "linux up after $(( $(date +%s) - t0 ))s ($(timeout 6 $SSH /opt/fatx/smc.py powerup 2>/dev/null | sed 's/.*-> //'))"
+      exit 0
+    fi
+    if timeout 3 curl -s --user xboxftp:xboxftp ftp://${XBOX_DASH_HOST:-10.0.0.205}/ >/dev/null 2>&1; then log "landed in Aurora"; break; fi
+    sleep 4
+  done
+done
+log "giving up"
+exit 1

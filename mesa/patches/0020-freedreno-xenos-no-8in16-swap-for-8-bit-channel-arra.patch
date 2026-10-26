@@ -1,0 +1,29 @@
+From db569508e61dffdd6b04036c19119308ceb45d9d Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 06:15:07 -0700
+Subject: [PATCH 20/22] freedreno/xenos: no 8in16 swap for 8-bit-channel array
+ formats (L8A8 had L and A swapped)
+
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_texture.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+index 771feab..967d93f 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+@@ -179,8 +179,8 @@ fd2_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
+       /* texels written by a big-endian CPU: swap within each component */
+       const struct util_format_description *d = util_format_description(cso->format);
+       unsigned csz = d->channel[0].size;
+-      if (d->block.bits == 16 && d->nr_channels > 1)
+-         csz = 16;   /* packed 16-bit formats (565, 4444) are one word */
++      if (d->block.bits == 16 && d->nr_channels > 1 && !d->is_array)
++         csz = 16;   /* packed 16-bit formats (565, 4444) are one word; L8A8 is bytes */
+       if (d->block.bits == 32 && csz < 8)
+          csz = 32;   /* packed 32-bit formats (10_10_10_2) */
+       if (csz == 16)
+-- 
+2.53.0
+

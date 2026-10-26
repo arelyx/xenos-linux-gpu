@@ -1,0 +1,52 @@
+From: (xbox360 netboot session)
+Subject: [PATCH 1/2] net: sis190: fix lost TX queue wakeup on SMP (Xbox 360)
+
+On the Xbox 360 (Xenon, 6 hardware threads) the TX ring fills during bulk NFS
+writes and the queue is never woken again: the stop in sis190_start_xmit()
+and the wake in sis190_tx_interrupt() race on different CPUs with only
+smp_wmb/smp_rmb ordering, and the irq side only wakes when it saw the ring
+full at entry. Result: NETDEV WATCHDOG, NFS root hangs, hung-task panic.
+
+Use full barriers on both sides and wake whenever the queue is stopped and
+there is room. Tested: Debian NFS root boots and runs Xfce; previously died
+within 30 s of boot.
+
+---
+--- drivers/net/ethernet/sis/sis190.c.xenon-orig	2026-10-25 11:44:34.459761054 -0700
++++ drivers/net/ethernet/sis/sis190.c	2026-10-25 11:44:34.475637879 -0700
+@@ -726,10 +726,17 @@
+ 
+ 	if (tp->dirty_tx != dirty_tx) {
+ 		tp->dirty_tx = dirty_tx;
+-		smp_wmb();
+-		if (queue_stopped)
++		/*
++		 * Pairs with the smp_mb() in sis190_start_xmit(): make the
++		 * new dirty_tx visible before we look at the queue state, so
++		 * a stop racing with this cleanup is always followed by a wake.
++		 */
++		smp_mb();
++		if (netif_queue_stopped(dev) &&
++		    (READ_ONCE(tp->cur_tx) - dirty_tx) < NUM_TX_DESC)
+ 			netif_wake_queue(dev);
+ 	}
++	(void)queue_stopped;
+ }
+ 
+ /*
+@@ -1250,11 +1257,12 @@
+ 
+ 	SIS_W32(TxControl, 0x1a00 | CmdReset | CmdTxEnb);
+ 
+-	dirty_tx = tp->dirty_tx;
++	dirty_tx = READ_ONCE(tp->dirty_tx);
+ 	if ((tp->cur_tx - NUM_TX_DESC) == dirty_tx) {
+ 		netif_stop_queue(dev);
+-		smp_rmb();
+-		if (dirty_tx != tp->dirty_tx)
++		/* Pairs with the smp_mb() in sis190_tx_interrupt(). */
++		smp_mb();
++		if ((tp->cur_tx - READ_ONCE(tp->dirty_tx)) < NUM_TX_DESC)
+ 			netif_wake_queue(dev);
+ 	}
+ out:

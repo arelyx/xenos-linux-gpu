@@ -1,0 +1,60 @@
+From 6380bded273fa93796c53b377ff73d0502bd647d Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:30:54 -0700
+Subject: [PATCH 15/22] freedreno/xenos: COHER bit 25 invalidates the vertex
+ cache (0x03000000), found on hardware
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 819e81b..038db05 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -7,6 +7,7 @@
+ #define FD2_XENOS_H_
+ 
+ #include "util/format/u_format.h"
++#include <stdlib.h>
+ 
+ /* EDRAM tile: 80x16 samples at 32bpp */
+ #define XENOS_EDRAM_TILE_BYTES 5120
+@@ -95,12 +96,21 @@ xenos_depth_format_ok(enum pipe_format format)
+ /* Texture/vertex cache invalidate over all of DRAM, as libxenon's Xe_pInvalidateGpuCache:
+  * COHER_STATUS_HOST request, COHER_SIZE/BASE_HOST, then wait for the status bit to clear.
+  * (Xenos has no a2xx TC_CNTL_STATUS at 0x0e00.) */
++static inline uint32_t fd2_xenos_coher_bits(void)
++{
++   /* COHER_STATUS_HOST action bits, found on hardware 26 Oct 2026: bit 24 alone
++    * (libxenon's 0x01000000) leaves stale vertex data, bit 25 invalidates the
++    * vertex cache. 0x03000000 = both. XENOS_COHER=hex overrides for experiments. */
++   static int v = -1;
++   if (v < 0) { const char *e = getenv("XENOS_COHER"); v = e ? (int)strtoul(e, NULL, 16) : 0x03000000; }
++   return v;
++}
+ #define XENOS_REG_COHER_SIZE_HOST   0x0a2f
+ #define XENOS_REG_COHER_STATUS_HOST 0x0a31
+ #define fd2_xenos_invalidate_caches(ring)                                      \
+    do {                                                                        \
+       OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);                          \
+-      OUT_RING(ring, 0x01000000);                                              \
++      OUT_RING(ring, fd2_xenos_coher_bits());                                  \
+       OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);                            \
+       OUT_RING(ring, 0x20000000); /* size: all of DRAM */                      \
+       OUT_RING(ring, 0x00000000); /* base */                                   \
+@@ -117,7 +127,7 @@ xenos_depth_format_ok(enum pipe_format format)
+ #define fd2_xenos_invalidate_bo(ring, bo, size)                                \
+    do {                                                                        \
+       OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);                          \
+-      OUT_RING(ring, 0x01000000);                                              \
++      OUT_RING(ring, fd2_xenos_coher_bits());                                  \
+       OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);                            \
+       OUT_RING(ring, ((size) + 0x1fff) & ~0x1fffu);                            \
+       OUT_RELOC(ring, bo, 0, 0, 0);                                            \
+-- 
+2.53.0
+

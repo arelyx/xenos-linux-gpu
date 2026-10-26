@@ -1,0 +1,24 @@
+859 of 859 cases run: Pass 829, Fail 15, NotSupported 6, Hang 5, Crash 4
+
+dEQP-GLES2.functional.attribute_location                          3  Pass 2, Hang 1
+dEQP-GLES2.functional.buffer                                      3  Pass 3
+dEQP-GLES2.functional.clipping                                   30  Pass 30
+dEQP-GLES2.functional.color_clear                                 1  Pass 1
+dEQP-GLES2.functional.default_vertex_attrib                       2  Pass 2
+dEQP-GLES2.functional.depth_range                                 2  Pass 2
+dEQP-GLES2.functional.dither                                      1  Pass 1
+dEQP-GLES2.functional.draw                                        5  Pass 3, Fail 1, Hang 1
+dEQP-GLES2.functional.fbo                                        36  Pass 30, NotSupported 6
+dEQP-GLES2.functional.fragment_ops                               96  Pass 96
+dEQP-GLES2.functional.implementation_limits                       1  Pass 1
+dEQP-GLES2.functional.lifetime                                    2  Pass 2
+dEQP-GLES2.functional.light_amount                                1  Pass 1
+dEQP-GLES2.functional.negative_api                               13  Pass 13
+dEQP-GLES2.functional.rasterization                               3  Pass 2, Hang 1
+dEQP-GLES2.functional.shader_api                                  2  Pass 2
+dEQP-GLES2.functional.shaders                                   505  Pass 504, Crash 1
+dEQP-GLES2.functional.state_query                                20  Pass 20
+dEQP-GLES2.functional.texture                                    41  Pass 22, Fail 14, Crash 3, Hang 2
+dEQP-GLES2.functional.uniform_api                                63  Pass 63
+dEQP-GLES2.functional.vertex_arrays                              28  Pass 28
+dEQP-GLES2.info.render_target                                     1  Pass 1

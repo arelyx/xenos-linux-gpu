@@ -1,0 +1,19 @@
+--- a/glamor/glamor.c
++++ b/glamor/glamor.c
+@@
+     if (glamor_priv->is_gles) {
+-        assert(X_BYTE_ORDER == X_LITTLE_ENDIAN);
++#if X_BYTE_ORDER == X_BIG_ENDIAN
++        /* Big-endian GLES (Xbox 360 Xenos + Mesa freedreno): ARGB32 words are
++         * BGRA/8_8_8_8_REV, which the Mesa build accepts in GLES on big-endian. */
++        glamor_add_format(screen, 24, PICT_x8r8g8b8,
++                          GL_BGRA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, TRUE);
++        glamor_add_format(screen, 32, PICT_a8r8g8b8,
++                          GL_BGRA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, TRUE);
++#else
+         glamor_add_format(screen, 24, PICT_x8r8g8b8,
+                           GL_BGRA, GL_BGRA, GL_UNSIGNED_BYTE, TRUE);
+         glamor_add_format(screen, 32, PICT_a8r8g8b8,
+                           GL_BGRA, GL_BGRA, GL_UNSIGNED_BYTE, TRUE);
++#endif
+     } else {

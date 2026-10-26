@@ -1,0 +1,48 @@
+# Conformance testing
+
+We test against the Khronos dEQP-GLES2 must-pass list (`aosp_mustpass/main/gles2-main.txt`, 17,165 cases), built from VK-GL-CTS for ppc64 (see [setup.md](setup.md)). The harness and its design are in [methodology.md](methodology.md#5-test-with-a-conformance-suite-not-just-hand-written-tests).
+
+## Running
+
+```
+cd conformance
+./deqp-run.py <caselist> runs/<name> --batch 100 --skip known-hangs.txt
+./report.py runs/<name> [runs/<older>]
+./stop-run.sh            # stop a run and any power cycle it started
+```
+
+Surface: 256x256 pbuffer, config `rgba8888d24s8ms0`, surfaceless EGL. A batch of 100 cases takes 5-20 s when nothing hangs; texture filtering batches take minutes because dEQP's result verification runs on the Xenon CPU.
+
+`known-hangs.txt` holds classes skipped in full runs. Today it has two: ETC1 (dEQP's decoder runs the 458 MB console out of memory) and cube-map mipmap filtering (verification exceeds the batch timeout).
+
+## Results
+
+| run | cases | result |
+|---|---|---|
+| 1-in-20 sample, little-endian dEQP (invalid) | 859 | 533 pass (62%) |
+| 1-in-20 sample, big-endian dEQP | 859 | 829 pass, 15 fail, 5 hang, 4 crash, 6 not supported (96.5%) |
+| full run before the small-target, GPR and SIGILL fixes (partial) | 14,928 of 17,165 | 14,436 of 14,642 executed pass (98.6%), 286 skipped |
+| full run with all fixes | see `results/` | |
+
+Per-group tables are in `results/`. A case counts as passing if dEQP reports Pass, NotSupported, QualityWarning or CompatibilityWarning, as in Khronos submissions.
+
+## Bugs dEQP found that hand-written tests didn't
+
+| class | cause |
+|---|---|
+| buffer.write.* wedged the GPU | index DMA size counted bytes, Xenos counts 16-bit words |
+| draw.random with GL_LINE_LOOP | primitive type 7 is "triangle with W flags" on Xenos |
+| every process, first submit | missing `Xe_Init` state after CP init |
+| fragment_ops, clipping, vertex_arrays on pbuffers | byte vertex attributes reversed by the buffer-wide endian swap |
+| fragment_ops.blend | blend constants are floats on Xenos |
+| texture.specification la88 | 8in16 swap applied to an 8-bit array format |
+| mipmap generate, copyteximage, stencil-only FBO | render targets under 8x8 wedge the GPU |
+| shaders.indexing / struct dynamic, fragment | pixel shaders limited to 16 GPRs |
+| shaders.operator mul ivec4 | SIGILL: GCC used AltiVec `vmulouh`, which VMX128 lacks |
+| everything, at first | dEQP built little-endian (`DE_CPU` defaulted to x86_64) |
+
+## Known failures
+
+- Cube-map filtering at texel boundaries on the first face rendered (`texture.filtering.cube.*`).
+- RGBA4444 textures sample like 565.
+- `rasterization.limits.points` (largest point size) fails without hanging.

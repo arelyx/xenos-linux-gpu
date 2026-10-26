@@ -1,0 +1,49 @@
+From 33e298915bed0af095ffb6d5a306cf628d2955c2 Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 15:22:01 -0700
+Subject: [PATCH 05/22] freedreno/xenos: count-in-initiator draw packets (a20x
+ form, no visibility); hiz_pitch = pitch
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h | 3 ++-
+ src/gallium/drivers/freedreno/freedreno_draw.h | 8 +++++++-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index f3d2d89..b2a950c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -15,7 +15,8 @@
+ static inline uint32_t
+ xenos_rb_surface_info(uint32_t pitch)
+ {
+-   return pitch & 0x3fff;
++   /* libxenon sets hiz_pitch = surface pitch */
++   return (pitch & 0x3fff) | ((pitch & 0x3fff) << 18);
+ }
+ 
+ /* RB_COLOR_INFO: color_base (tiles) [11:0], color_format [19:16] (k_8_8_8_8 = 0) */
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.h b/src/gallium/drivers/freedreno/freedreno_draw.h
+index 2b58fd9..d566a9a 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.h
++++ b/src/gallium/drivers/freedreno/freedreno_draw.h
+@@ -53,7 +53,13 @@ fd_draw(struct fd_batch *batch, struct fd_ringbuffer *ring,
+       OUT_RING(ring, 0);
+    }
+ 
+-   if (is_a20x(batch->ctx->screen)) {
++   if (is_xenos(batch->ctx->screen)) {
++      /* Xenos uses the a20x-style initiator: the index count lives in bits
++       * 31:16 (libxenon, Xenia VGT_DRAW_INITIATOR); no visibility/binning */
++      vismode = IGNORE_VISIBILITY;
++   }
++
++   if (is_a20x(batch->ctx->screen) || is_xenos(batch->ctx->screen)) {
+       /* a20x has a different draw command for drawing with binning data
+        * note: if we do patching we will have to insert a NOP
+        *
+-- 
+2.53.0
+

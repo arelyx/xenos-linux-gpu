@@ -1,0 +1,97 @@
+From 7992d160410626847546b549166df945f5dbff07 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 08:23:23 -0700
+Subject: [PATCH 21/22] freedreno/xenos: pad tiles to 8x8 pixels; render
+ targets smaller than 8x8 wedged the GPU
+
+Also round the resolve rectangle to 8 pixels and the copy destination height to 32
+(Xenia kResolveAlignmentPixels). Found with gltest/glmip: 4x4, 2x2 and 1x1 targets
+hung, 8x8 worked; fixes glGenerateMipmap and glCopyTexImage hangs.
+
+Generated-by: LLM
+---
+ src/freedreno/common/freedreno_rd_output.c     | 10 ++++++++++
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c  | 13 +++++++++----
+ src/gallium/drivers/freedreno/freedreno_gmem.c |  7 +++++++
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/src/freedreno/common/freedreno_rd_output.c b/src/freedreno/common/freedreno_rd_output.c
+index 70c1963..c70dbb4 100644
+--- a/src/freedreno/common/freedreno_rd_output.c
++++ b/src/freedreno/common/freedreno_rd_output.c
+@@ -167,6 +167,16 @@ fd_rd_output_init(struct fd_rd_output *output, const char* output_name)
+    else
+       name_len = asprintf(&output->name, "%s", output_name);
+    assert(name_len != -1);
++   /* one process can open several devices (dEQP recreates EGL displays per case); number
++    * them so later devices do not overwrite earlier dumps */
++   {
++      static int instance;
++      char *n;
++      if (instance++ && asprintf(&n, "%s_dev%d", output->name, instance - 1) != -1) {
++         free(output->name);
++         output->name = n;
++      }
++   }
+    fd_rd_output_sanitize_name(output->name);
+ 
+    output->combine = false;
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index f977a3e..654f019 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -91,7 +91,7 @@ emit_gmem2mem_surf(struct fd_batch *batch, uint32_t base,
+ 
+    if (is_xenos(batch->ctx->screen)) {
+       bool depth = util_format_is_depth_or_stencil(format);
+-      uint32_t height = pipe_surface_height(psurf);
++      uint32_t height = align(pipe_surface_height(psurf), 32);   /* Xenia aligns copy_dest_height to 32 */
+ 
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       if (depth) {
+@@ -218,7 +218,8 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
+    OUT_RING(ring, xy2d(0, 0));                    /* PA_SC_WINDOW_SCISSOR_TL */
+-   OUT_RING(ring, xy2d(pfb->width, pfb->height)); /* PA_SC_WINDOW_SCISSOR_BR */
++   OUT_RING(ring, is_xenos(ctx->screen) ? xy2d(align(pfb->width, 8), align(pfb->height, 8))
++                                        : xy2d(pfb->width, pfb->height)); /* PA_SC_WINDOW_SCISSOR_BR */
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
+@@ -228,8 +229,12 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+       /* Xenos: the resolve copies exactly the rectangle drawn, and the bin is
+        * padded to whole EDRAM tile pairs, so cover the framebuffer, not the bin
+        * (a bin-sized rect would write past the end of the destination). */
+-      float rw = is_xenos(ctx->screen) ? (float)pfb->width : (float)gmem->bin_w;
+-      float rh = is_xenos(ctx->screen) ? (float)pfb->height : (float)gmem->bin_h;
++      /* ...rounded up to 8 pixels: Xenos resolves work on 8x8 blocks (Xenia
++       * kResolveAlignmentPixels, D3D9 rounds the same way) and a 4x2 resolve
++       * (the small mip levels of glGenerateMipmap/glCopyTexImage) wedges the GPU.
++       * Levels are padded to 32x32 in memory, so the extra pixels stay inside. */
++      float rw = is_xenos(ctx->screen) ? (float)align(pfb->width, 8) : (float)gmem->bin_w;
++      float rh = is_xenos(ctx->screen) ? (float)align(pfb->height, 8) : (float)gmem->bin_h;
+       OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+       OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
+       OUT_RING(ring, fui(rw / 2.0f)); /* XSCALE */
+diff --git a/src/gallium/drivers/freedreno/freedreno_gmem.c b/src/gallium/drivers/freedreno/freedreno_gmem.c
+index bd60cca..d2208e1 100644
+--- a/src/gallium/drivers/freedreno/freedreno_gmem.c
++++ b/src/gallium/drivers/freedreno/freedreno_gmem.c
+@@ -404,6 +404,13 @@ gmem_stateobj_init(struct fd_screen *screen, struct gmem_key *key)
+          tile->p = p;
+          tile->bin_w = bw;
+          tile->bin_h = bh;
++         /* Xenos: a screen scissor / resolve smaller than 8x8 pixels wedges the
++          * GPU (4x4, 2x2 and 1x1 render targets hang, 8x8 works; found with
++          * gltest/glmip).  Xenos uses one bin, padded well past 8 pixels. */
++         if (is_xenos(screen)) {
++            tile->bin_w = MIN2(align(bw, 8), gmem->bin_w);
++            tile->bin_h = MIN2(align(bh, 8), gmem->bin_h);
++         }
+          tile->xoff = xoff;
+          tile->yoff = yoff;
+ 
+-- 
+2.53.0
+

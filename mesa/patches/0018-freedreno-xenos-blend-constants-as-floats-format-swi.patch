@@ -1,0 +1,114 @@
+From bed0afec2ab0960645d3e04edbcb57f3f1ef529f Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 02:17:41 -0700
+Subject: [PATCH 18/22] freedreno/xenos: blend constants as floats, format
+ swizzle on EDRAM restore, 32-bit-component vertex formats only, resolve
+ endian 2 for byte-reversed formats
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c   | 10 +++++-----
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c   |  8 ++++++--
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c |  7 ++++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h  | 10 +++++-----
+ 4 files changed, 22 insertions(+), 13 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index da3cdb2..421c3df 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -6,6 +6,7 @@
+  *    Rob Clark <robclark@freedesktop.org>
+  */
+ 
++#include <stdlib.h>
+ #include "pipe/p_state.h"
+ #include "util/u_helpers.h"
+ #include "util/u_memory.h"
+@@ -415,10 +416,9 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+    if (dirty & FD_DIRTY_BLEND_COLOR) {
+       OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_BLEND_RED));
+-      OUT_RING(ring, float_to_ubyte(ctx->blend_color.color[0]));
+-      OUT_RING(ring, float_to_ubyte(ctx->blend_color.color[1]));
+-      OUT_RING(ring, float_to_ubyte(ctx->blend_color.color[2]));
+-      OUT_RING(ring, float_to_ubyte(ctx->blend_color.color[3]));
++      for (unsigned i = 0; i < 4; i++)   /* Xenos: floats (Xenia RB_BLEND_RED kFloat) */
++         OUT_RING(ring, fd2_xenos ? fui(ctx->blend_color.color[i])
++                                  : float_to_ubyte(ctx->blend_color.color[i]));
+    }
+ 
+    if (dirty & (FD_DIRTY_TEX | FD_DIRTY_PROG))
+@@ -499,7 +499,7 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_INTERPOLATOR_CNTL));
+-   OUT_RING(ring, 0xffffffff);
++   OUT_RING(ring, getenv("XENOS_INTERP") ? strtoul(getenv("XENOS_INTERP"), NULL, 16) : 0xffffffff);
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_AA_CONFIG));
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 228bc7f..f977a3e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -302,9 +302,13 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+              0);
+    OUT_RING(ring, A2XX_SQ_TEX_2_WIDTH(pipe_surface_width(psurf) - 1) |
+                      A2XX_SQ_TEX_2_HEIGHT(pipe_surface_height(psurf) - 1));
++   /* Xenos: the restore reads the surface in its own byte order (A8R8G8B8 etc.), so
++    * route channels like a sampler view does */
+    OUT_RING(ring, A2XX_SQ_TEX_3_MIP_FILTER(SQ_TEX_FILTER_BASEMAP) |
+-                     A2XX_SQ_TEX_3_SWIZ_X(0) | A2XX_SQ_TEX_3_SWIZ_Y(1) |
+-                     A2XX_SQ_TEX_3_SWIZ_Z(2) | A2XX_SQ_TEX_3_SWIZ_W(3) |
++                     (fd2_xenos ? fd2_tex_swiz(format, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
++                                               PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W)
++                                : A2XX_SQ_TEX_3_SWIZ_X(0) | A2XX_SQ_TEX_3_SWIZ_Y(1) |
++                                     A2XX_SQ_TEX_3_SWIZ_Z(2) | A2XX_SQ_TEX_3_SWIZ_W(3)) |
+                      A2XX_SQ_TEX_3_XY_MAG_FILTER(SQ_TEX_FILTER_POINT) |
+                      A2XX_SQ_TEX_3_XY_MIN_FILTER(SQ_TEX_FILTER_POINT));
+    OUT_RING(ring, 0x00000000);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index a2aaec9..4172991 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -44,7 +44,12 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+    if ((usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_VERTEX_BUFFER)) &&
+        !util_format_is_srgb(format) && !util_format_is_pure_integer(format) &&
+        fd2_pipe2surface(format).format != FMT_INVALID) {
+-      retval |= usage & PIPE_BIND_VERTEX_BUFFER;
++      /* Xenos: one fetch-constant endian swap (8in32) serves every attribute of a
++       * buffer, so 8- and 16-bit components arrive reordered on a big-endian host;
++       * only 32-bit-component formats are fetched directly, u_vbuf converts the rest */
++      if (!is_xenos(fd_screen(pscreen)) ||
++          util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) == 32)
++         retval |= usage & PIPE_BIND_VERTEX_BUFFER;
+       /* the only npot blocksize supported texture format is R32G32B32_FLOAT */
+       if (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+           format == PIPE_FORMAT_R32G32B32_FLOAT)
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 5025850..6f6fad3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -62,11 +62,11 @@ xenos_rb_copy_dest_info(enum pipe_format format)
+    /* swap per hardware (26 Oct 2026): swap 0 writes R,G,B,A bytes for an RGBA target */
+    case PIPE_FORMAT_R8G8B8A8_UNORM: case PIPE_FORMAT_R8G8B8X8_UNORM: break;
+    case PIPE_FORMAT_B8G8R8A8_UNORM: case PIPE_FORMAT_B8G8R8X8_UNORM: swap = 1; break;
+-   /* Resolve endian 3 reverses the bytes of each dword and 2 swaps its halves (measured on
+-    * hardware 26 Oct 2026 with dEQP color_clear on an A8R8G8B8 pbuffer, all 8 combinations;
+-    * Xenia's Endian128 names 2 "8in32"). */
+-   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 3; break;
+-   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 3; swap = 1; break;
++   /* endian 2 = 8in32 (Xenia Endian128), checked on hardware 26 Oct 2026 with CPU
++    * readback of an A8R8G8B8 pbuffer (glpb).  An earlier "endian 3" reading came from
++    * dEQP built with DE_CPU=X86_64, i.e. little-endian reference images. */
++   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 2; break;
++   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; swap = 1; break;
+    default: break;
+    }
+    /* experiment hook: XENOS_RESOLVE_<FMT>=<endian><swap>, e.g. XENOS_RESOLVE_A8R8G8B8_UNORM=21 */
+-- 
+2.53.0
+

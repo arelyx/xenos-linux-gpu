@@ -1,0 +1,44 @@
+From 584fe61a1f54aad602c6ba7fe2f97d15da6c2ff5 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:32:29 -0700
+Subject: [PATCH 16/22] freedreno/xenos: also invalidate the solid vertex
+ buffer before clears and restores
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c | 3 +++
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index a5ae181..ad0bd15 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -263,6 +263,9 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
++      /* the all-of-DRAM form may not reach the vertex cache: also the clear's vertex buffer */
++      fd2_xenos_invalidate_bo(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo,
++                              fd_bo_size(fd_resource(fd2_ctx->solid_vertexbuf)->bo));
+    } else {
+       OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+       OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 53301c0..228bc7f 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -376,6 +376,8 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
++      fd2_xenos_invalidate_bo(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo,
++                              fd_bo_size(fd_resource(fd2_ctx->solid_vertexbuf)->bo));
+    } else {
+       OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+       OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
+-- 
+2.53.0
+

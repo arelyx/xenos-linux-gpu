@@ -1,0 +1,46 @@
+From a9e22ac21006965d7fdab35f9741b6305ffba857 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 17:05:20 -0700
+Subject: [PATCH 08/22] freedreno/xenos: fence with WAIT_UNTIL + MEM_WRITE;
+ EVENT_WRITE_SHD wedges the memory hub
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/freedreno/drm/freedreno_pipe.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/src/freedreno/drm/freedreno_pipe.c b/src/freedreno/drm/freedreno_pipe.c
+index 773eceb..d3574d0 100644
+--- a/src/freedreno/drm/freedreno_pipe.c
++++ b/src/freedreno/drm/freedreno_pipe.c
+@@ -207,15 +207,16 @@ fd_pipe_emit_fence(struct fd_pipe *pipe, struct fd_ringbuffer *ring)
+       OUT_RELOC(ring, control_ptr(pipe, fence));   /* ADDR_LO/HI */
+       OUT_RING(ring, fence);
+    } else if (pipe->dev_id.gpu_id == 290) {
+-      /* Xbox 360 Xenos: the memory-writing event is EVENT_WRITE_SHD
+-       * (initiator, address | endian, value); Xbox software never uses the
+-       * address form of EVENT_WRITE. Endian 2 (8in32) so the value lands in
+-       * host order on the big-endian CPU. */
+-      OUT_PKT3(ring, CP_EVENT_WRITE_SHD, 3);
+-      OUT_RING(ring, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
+-      OUT_RELOC(ring, (pipe)->control_mem, offsetof(struct fd_pipe_control, fence),
+-                UTIL_ARCH_BIG_ENDIAN ? 2 : 0, 0);
+-      OUT_RING(ring, fence);
++      /* Xbox 360 Xenos: EVENT_WRITE_SHD with CACHE_FLUSH_TS leaves the memory
++       * hub busy forever (hardware, 26 Oct 2026), and libxenon never uses
++       * memory-writing events. Do what the kernel's own fences do: wait for
++       * idle with WAIT_UNTIL, then MEM_WRITE the value. MEM_WRITE stores
++       * little-endian, so swap it for a big-endian host. */
++      OUT_PKT0(ring, 0x05c8, 1);    /* WAIT_UNTIL */
++      OUT_RING(ring, 0x00020000);   /* WAIT_FOR_IDLE (libxenon Xe_pWaitUntilIdle) */
++      OUT_PKT3(ring, CP_MEM_WRITE, 2);
++      OUT_RELOC(ring, (pipe)->control_mem, offsetof(struct fd_pipe_control, fence), 0, 0);
++      OUT_RING(ring, UTIL_ARCH_BIG_ENDIAN ? __builtin_bswap32(fence) : fence);
+    } else {
+       OUT_PKT3(ring, CP_EVENT_WRITE, 3);
+       OUT_RING(ring, CP_EVENT_WRITE_0_EVENT(CACHE_FLUSH_TS));
+-- 
+2.53.0
+

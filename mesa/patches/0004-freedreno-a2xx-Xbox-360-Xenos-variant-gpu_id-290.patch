@@ -1,0 +1,612 @@
+From 7f95eb07d3774b3ccd1ce8b2336179071a802a52 Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 15:17:56 -0700
+Subject: [PATCH 04/22] freedreno/a2xx: Xbox 360 Xenos variant (gpu_id 290)
+
+New device entry (chip 0x02090000, 10MB GMEM = EDRAM, bins aligned to 160x16 so the
+EDRAM pitch is an even number of 80x16 tiles) and a drm-shim entry. On Xenos:
+- render-target registers use the Xenos layout: EDRAM bases in tiles, no a2xx
+  format/swap fields (fd2_xenos.h); RB_SURFACE_INFO pitch only
+- resolve: Xenos RB_COPY_CONTROL (convert), RB_COPY_DEST_PITCH (pitch|height<<16),
+  RB_COPY_DEST_INFO (format, endian and R/B swap per pipe format, measured on hw)
+- single bin (EDRAM holds 720p color+depth), no RB_COPY_DEST_OFFSET
+- no a2xx perfmon/PM_OVERRIDE/TP0_CHICKEN/TC_CNTL_STATUS writes; cache invalidate via
+  the COHER_*_HOST sequence libxenon uses; no SET_DRAW_INIT_FLAGS / WAIT_REG_EQ
+- MEM_WRITE split to one dword per packet (Xenos stores only the first)
+- always render through EDRAM (no sysmem path for batches that draw)
+- render formats limited to 8888 (incl. big-endian ARGB/ABGR variants), depth D24S8
+The resulting command streams pass xegpu's kernel command checker under drm-shim.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/freedreno/common/freedreno_devices.py     |  19 +++
+ src/freedreno/drm-shim/freedreno_noop.c       |   5 +
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  17 ++-
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c |  56 +++++----
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c |  98 +++++++++++++--
+ .../drivers/freedreno/a2xx/fd2_screen.c       |  10 +-
+ .../drivers/freedreno/a2xx/fd2_xenos.h        | 113 ++++++++++++++++++
+ .../drivers/freedreno/freedreno_gmem.c        |   6 +-
+ .../drivers/freedreno/freedreno_screen.h      |   7 ++
+ 9 files changed, 292 insertions(+), 39 deletions(-)
+ create mode 100644 src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index e8ffb9d..6d93b88 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -27,6 +27,25 @@ add_gpus([
+         threadsize_base = 8, # TODO: Confirm this
+     ))
+ 
++# Xbox 360 "Xenos" (ATI C1): the R400 ancestor of Adreno 200. Same shader ISA and
++# command processor; render targets live in 10MB of EDRAM addressed in 80x16-sample
++# tiles (5120 bytes at 32bpp), with an even number of tiles per line.
++add_gpus([
++        GPUId(gpu_id=290, chip_id=0x02090000, name="Xenos"),
++    ], GPUInfo(
++        CHIP.A2XX,
++        gmem_align_w = 160, gmem_align_h = 16,
++        tile_align_w = 160, tile_align_h = 16,
++        tile_max_w   = 2560,
++        tile_max_h   = ~0,
++        num_vsc_pipes = 8,
++        cs_shared_mem_size = 0,
++        num_sp_cores = 0,
++        wave_granularity = 2,
++        fibers_per_sp = 0,
++        threadsize_base = 8,
++    ))
++
+ add_gpus([
+         GPUId(305),
+         GPUId(307),
+diff --git a/src/freedreno/drm-shim/freedreno_noop.c b/src/freedreno/drm-shim/freedreno_noop.c
+index 4c21ab3..467c623 100644
+--- a/src/freedreno/drm-shim/freedreno_noop.c
++++ b/src/freedreno/drm-shim/freedreno_noop.c
+@@ -219,6 +219,11 @@ static const struct msm_device_info device_infos[] = {
+       .chip_id = CHIPID(6, 3, 0, 0xff),
+       .gmem_size = 1024 * 1024,
+    },
++   {
++      .gpu_id = 290,   /* Xbox 360 Xenos */
++      .chip_id = CHIPID(2, 9, 0, 0),
++      .gmem_size = 10 * 1024 * 1024,
++   },
+    {
+       .gpu_id = 200,
+       .chip_id = CHIPID(2, 0, 0, 0),
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index c7ee307..8eae85c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -16,6 +16,7 @@
+ 
+ #include "fd2_context.h"
+ #include "fd2_draw.h"
++#include "fd2_xenos.h"
+ #include "fd2_emit.h"
+ #include "fd2_program.h"
+ #include "fd2_util.h"
+@@ -75,8 +76,12 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
+    OUT_RING(ring, info->index_size ? 0 : draw->start);
+ 
+-   OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+-   OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   if (is_xenos(ctx->screen)) {
++      fd2_xenos_invalidate_caches(ring);
++   } else {
++      OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
++      OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   }
+ 
+    if (is_a20x(ctx->screen)) {
+       /* wait for DMA to finish and
+@@ -245,8 +250,12 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+ 
+    fd2_program_emit(ctx, ring, &ctx->solid_prog);
+ 
+-   OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+-   OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   if (is_xenos(ctx->screen)) {
++      fd2_xenos_invalidate_caches(ring);
++   } else {
++      OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
++      OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   }
+ 
+    if (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)) {
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index ed6ddf0..2171f09 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -16,6 +16,7 @@
+ #include "fd2_blend.h"
+ #include "fd2_context.h"
+ #include "fd2_emit.h"
++#include "fd2_xenos.h"
+ #include "util/u_endian.h"
+ #include "fd2_program.h"
+ #include "fd2_rasterizer.h"
+@@ -422,17 +423,20 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+       OUT_RING(ring, 0x0000003b);
+    }
+ 
+-   /* enable perfcntrs */
+-   OUT_PKT0(ring, REG_A2XX_CP_PERFMON_CNTL, 1);
+-   OUT_RING(ring, COND(FD_DBG(PERFC), 1));
++   /* Xenos: no a2xx perf counter, PM override or TP chicken registers at these offsets */
++   if (!is_xenos(ctx->screen)) {
++      /* enable perfcntrs */
++      OUT_PKT0(ring, REG_A2XX_CP_PERFMON_CNTL, 1);
++      OUT_RING(ring, COND(FD_DBG(PERFC), 1));
+ 
+-   /* note: perfcntrs don't work without the PM_OVERRIDE bit */
+-   OUT_PKT0(ring, REG_A2XX_RBBM_PM_OVERRIDE1, 2);
+-   OUT_RING(ring, 0xffffffff);
+-   OUT_RING(ring, 0x00000fff);
++      /* note: perfcntrs don't work without the PM_OVERRIDE bit */
++      OUT_PKT0(ring, REG_A2XX_RBBM_PM_OVERRIDE1, 2);
++      OUT_RING(ring, 0xffffffff);
++      OUT_RING(ring, 0x00000fff);
+ 
+-   OUT_PKT0(ring, REG_A2XX_TP0_CHICKEN, 1);
+-   OUT_RING(ring, 0x00000002);
++      OUT_PKT0(ring, REG_A2XX_TP0_CHICKEN, 1);
++      OUT_RING(ring, 0x00000002);
++   }
+ 
+    OUT_PKT3(ring, CP_INVALIDATE_STATE, 1);
+    OUT_RING(ring, 0x00007fff);
+@@ -491,25 +495,33 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_DEST_INFO));
+-   OUT_RING(ring, A2XX_RB_COPY_DEST_INFO_FORMAT(COLORX_4_4_4_4) |
+-                     A2XX_RB_COPY_DEST_INFO_WRITE_RED |
+-                     A2XX_RB_COPY_DEST_INFO_WRITE_GREEN |
+-                     A2XX_RB_COPY_DEST_INFO_WRITE_BLUE |
+-                     A2XX_RB_COPY_DEST_INFO_WRITE_ALPHA);
++   if (is_xenos(ctx->screen))
++      OUT_RING(ring, xenos_rb_copy_dest_info(PIPE_FORMAT_B8G8R8A8_UNORM));
++   else
++      OUT_RING(ring, A2XX_RB_COPY_DEST_INFO_FORMAT(COLORX_4_4_4_4) |
++                        A2XX_RB_COPY_DEST_INFO_WRITE_RED |
++                        A2XX_RB_COPY_DEST_INFO_WRITE_GREEN |
++                        A2XX_RB_COPY_DEST_INFO_WRITE_BLUE |
++                        A2XX_RB_COPY_DEST_INFO_WRITE_ALPHA);
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_WRAPPING_0));
+    OUT_RING(ring, 0x00000000); /* SQ_WRAPPING_0 */
+    OUT_RING(ring, 0x00000000); /* SQ_WRAPPING_1 */
+ 
+-   OUT_PKT3(ring, CP_SET_DRAW_INIT_FLAGS, 1);
+-   OUT_RING(ring, 0x00000000);
+-
+-   OUT_PKT3(ring, CP_WAIT_REG_EQ, 4);
+-   OUT_RING(ring, 0x000005d0);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x5f601000);
+-   OUT_RING(ring, 0x00000001);
++   if (is_xenos(ctx->screen)) {
++      /* no binning draw-init flags; wait for idle the way libxenon does */
++      OUT_WFI(ring);
++   } else {
++      OUT_PKT3(ring, CP_SET_DRAW_INIT_FLAGS, 1);
++      OUT_RING(ring, 0x00000000);
++
++      OUT_PKT3(ring, CP_WAIT_REG_EQ, 4);
++      OUT_RING(ring, 0x000005d0);
++      OUT_RING(ring, 0x00000000);
++      OUT_RING(ring, 0x5f601000);
++      OUT_RING(ring, 0x00000001);
++   }
+ 
+    OUT_PKT0(ring, REG_A2XX_SQ_INST_STORE_MANAGMENT, 1);
+    OUT_RING(ring, 0x00000180);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 91a339b..b84fef6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -20,6 +20,7 @@
+ #include "fd2_draw.h"
+ #include "fd2_emit.h"
+ #include "fd2_gmem.h"
++#include "fd2_xenos.h"
+ #include "util/u_endian.h"
+ #include "fd2_program.h"
+ #include "fd2_util.h"
+@@ -88,6 +89,34 @@ emit_gmem2mem_surf(struct fd_batch *batch, uint32_t base,
+    if (!rsc->valid)
+       return;
+ 
++   if (is_xenos(batch->ctx->screen)) {
++      bool depth = util_format_is_depth_or_stencil(format);
++      uint32_t height = pipe_surface_height(psurf);
++
++      OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++      if (depth) {
++         OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTH_INFO));
++         OUT_RING(ring, xenos_rb_depth_info(base));
++      } else {
++         OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
++         OUT_RING(ring, xenos_rb_color_info(base));
++      }
++      OUT_PKT3(ring, CP_SET_CONSTANT, 5);
++      OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_CONTROL));
++      OUT_RING(ring, xenos_rb_copy_control(depth));
++      OUT_RELOC(ring, rsc->bo, offset, 0, 0); /* RB_COPY_DEST_BASE */
++      OUT_RING(ring, xenos_rb_copy_dest_pitch(pitch, height));
++      OUT_RING(ring, xenos_rb_copy_dest_info(format));
++      OUT_WFI(ring);
++      OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++      OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
++      OUT_RING(ring, 3); /* VGT_MAX_VTX_INDX */
++      OUT_RING(ring, 0); /* VGT_MIN_VTX_INDX */
++      fd_draw(batch, ring, DI_PT_RECTLIST, IGNORE_VISIBILITY,
++              DI_SRC_SEL_AUTO_INDEX, 3, 0, INDEX_SIZE_IGN, 0, 0, NULL);
++      return;
++   }
++
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
+    OUT_RING(ring, A2XX_RB_COLOR_INFO_BASE(base) |
+@@ -226,8 +255,11 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+    enum pipe_format format = fd_gmem_restore_format(psurf->format);
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
+-   OUT_RING(ring, A2XX_RB_COLOR_INFO_BASE(base) |
+-                     A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
++   if (is_xenos(batch->ctx->screen))
++      OUT_RING(ring, xenos_rb_color_info(base));
++   else
++      OUT_RING(ring, A2XX_RB_COLOR_INFO_BASE(base) |
++                        A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
+ 
+    /* emit fb as a texture: */
+    OUT_PKT3(ring, CP_SET_CONSTANT, 7);
+@@ -289,6 +321,17 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+    x1 = ((float)tile->xoff + bin_w) / ((float)pfb->width);
+    y0 = ((float)tile->yoff) / ((float)pfb->height);
+    y1 = ((float)tile->yoff + bin_h) / ((float)pfb->height);
++   if (is_xenos(ctx->screen)) {
++      /* Xenos MEM_WRITE stores only the first data dword: one packet per value.
++       * The CP stores it little-endian, while vertex data is fetched 8in32 on
++       * big-endian hosts, so pre-swap. */
++      const float v[6] = {x0, y0, x1, y0, x0, y1};
++      for (int k = 0; k < 6; k++) {
++         OUT_PKT3(ring, CP_MEM_WRITE, 2);
++         OUT_RELOC(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo, 36 + 4 * k, 0, 0);
++         OUT_RING(ring, UTIL_ARCH_BIG_ENDIAN ? util_bswap32(fui(v[k])) : fui(v[k]));
++      }
++   } else {
+    OUT_PKT3(ring, CP_MEM_WRITE, 7);
+    OUT_RELOC(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo, 36, 0, 0);
+    OUT_RING(ring, fui(x0));
+@@ -297,6 +340,7 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+    OUT_RING(ring, fui(y0));
+    OUT_RING(ring, fui(x0));
+    OUT_RING(ring, fui(y1));
++   }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
+@@ -304,8 +348,12 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+ 
+    fd2_program_emit(ctx, ring, &ctx->blit_prog[0]);
+ 
+-   OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+-   OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   if (is_xenos(ctx->screen)) {
++      fd2_xenos_invalidate_caches(ring);
++   } else {
++      OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
++      OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
++   }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTHCONTROL));
+@@ -440,6 +488,16 @@ fd2_emit_sysmem_prep(struct fd_batch *batch)
+ 
+    fd2_emit_restore(ctx, ring);
+ 
++   if (is_xenos(ctx->screen)) {
++      /* Xenos renders only into EDRAM; the sysmem path is used just for
++       * batches without draws, which need no render target state. */
++      assert(!batch->num_draws);
++      patch_draws(batch, IGNORE_VISIBILITY);
++      util_dynarray_clear(&batch->draw_patches);
++      util_dynarray_clear(&batch->shader_patches);
++      return;
++   }
++
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_SURFACE_INFO));
+    OUT_RING(ring, A2XX_RB_SURFACE_INFO_SURFACE_PITCH(pitch));
+@@ -485,6 +543,13 @@ fd2_emit_tile_init(struct fd_batch *batch) assert_dt
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 4);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_SURFACE_INFO));
++   if (is_xenos(ctx->screen)) {
++      /* Xenos: one bin covering the framebuffer (asserted below), EDRAM bases in tiles */
++      assert(gmem->nbins_x == 1 && gmem->nbins_y == 1);
++      OUT_RING(ring, xenos_rb_surface_info(gmem->bin_w));
++      OUT_RING(ring, xenos_rb_color_info(gmem->cbuf_base[0]));
++      OUT_RING(ring, xenos_rb_depth_info(gmem->zsbuf_base[0]));
++   } else {
+    OUT_RING(ring, gmem->bin_w); /* RB_SURFACE_INFO */
+    OUT_RING(ring, A2XX_RB_COLOR_INFO_SWAP(fmt2swap(format)) |
+                      A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
+@@ -492,6 +557,7 @@ fd2_emit_tile_init(struct fd_batch *batch) assert_dt
+    if (pfb->zsbuf.texture)
+       reg |= A2XX_RB_DEPTH_INFO_DEPTH_FORMAT(fd_pipe2depth(pfb->zsbuf.format));
+    OUT_RING(ring, reg); /* RB_DEPTH_INFO */
++   }
+ 
+    /* fast clear patches */
+    int depth_size = -1;
+@@ -526,6 +592,12 @@ fd2_emit_tile_init(struct fd_batch *batch) assert_dt
+             align(gmem->bin_w * gmem->bin_h * color_size * 2, 0x8000) / 1024;
+          break;
+       case GMEM_PATCH_RESTORE_INFO:
++         if (is_xenos(ctx->screen)) {
++            patch->cs[0] = xenos_rb_surface_info(gmem->bin_w);
++            patch->cs[1] = xenos_rb_color_info(gmem->cbuf_base[0]);
++            patch->cs[2] = xenos_rb_depth_info(gmem->zsbuf_base[0]);
++            continue;
++         }
+          patch->cs[0] = gmem->bin_w;
+          patch->cs[1] = A2XX_RB_COLOR_INFO_SWAP(fmt2swap(format)) |
+                         A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format));
+@@ -663,8 +735,11 @@ fd2_emit_tile_prep(struct fd_batch *batch, const struct fd_tile *tile)
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
+-   OUT_RING(ring, A2XX_RB_COLOR_INFO_SWAP(1) | /* RB_COLOR_INFO */
+-                     A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
++   if (is_xenos(batch->ctx->screen))
++      OUT_RING(ring, xenos_rb_color_info(batch->gmem_state->cbuf_base[0]));
++   else
++      OUT_RING(ring, A2XX_RB_COLOR_INFO_SWAP(1) | /* RB_COLOR_INFO */
++                        A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
+ 
+    /* setup screen scissor for current tile (same for mem2gmem): */
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+@@ -688,8 +763,11 @@ fd2_emit_tile_renderprep(struct fd_batch *batch,
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
+-   OUT_RING(ring, A2XX_RB_COLOR_INFO_SWAP(fmt2swap(format)) |
+-                     A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
++   if (is_xenos(ctx->screen))
++      OUT_RING(ring, xenos_rb_color_info(batch->gmem_state->cbuf_base[0]));
++   else
++      OUT_RING(ring, A2XX_RB_COLOR_INFO_SWAP(fmt2swap(format)) |
++                        A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
+ 
+    /* setup window scissor and offset for current tile (different
+     * from mem2gmem):
+@@ -705,11 +783,13 @@ fd2_emit_tile_renderprep(struct fd_batch *batch,
+    OUT_RING(ring, A2XX_PA_SC_SCREEN_SCISSOR_BR_X(tile->bin_w) |
+                      A2XX_PA_SC_SCREEN_SCISSOR_BR_Y(tile->bin_h));
+ 
+-   /* set the copy offset for gmem2mem */
++   /* set the copy offset for gmem2mem (Xenos has no such register: single bin) */
++   if (!is_xenos(ctx->screen)) {
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_DEST_OFFSET));
+    OUT_RING(ring, A2XX_RB_COPY_DEST_OFFSET_X(tile->xoff) |
+                      A2XX_RB_COPY_DEST_OFFSET_Y(tile->yoff));
++   }
+ 
+    /* tile offset for gl_FragCoord on a20x (C64 in fragment shader) */
+    if (is_a20x(ctx->screen)) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index f29b7b1..c943d2b 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -13,6 +13,7 @@
+ #include "fd2_emit.h"
+ #include "fd2_resource.h"
+ #include "fd2_screen.h"
++#include "fd2_xenos.h"
+ #include "fd2_util.h"
+ 
+ static bool
+@@ -35,7 +36,8 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+       return false;
+ 
+    if ((usage & PIPE_BIND_RENDER_TARGET) &&
+-       fd2_pipe2color(format) != (enum a2xx_colorformatx) ~0) {
++       (is_xenos(fd_screen(pscreen)) ? xenos_color_format_ok(format)
++                                     : fd2_pipe2color(format) != (enum a2xx_colorformatx) ~0)) {
+       retval |= PIPE_BIND_RENDER_TARGET;
+    }
+ 
+@@ -51,13 +53,15 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+ 
+    if ((usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET |
+                  PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)) &&
+-       (fd2_pipe2color(format) != (enum a2xx_colorformatx) ~0)) {
++       (is_xenos(fd_screen(pscreen)) ? xenos_color_format_ok(format)
++                                     : fd2_pipe2color(format) != (enum a2xx_colorformatx) ~0)) {
+       retval |= usage & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET |
+                          PIPE_BIND_SCANOUT | PIPE_BIND_SHARED);
+    }
+ 
+    if ((usage & PIPE_BIND_DEPTH_STENCIL) &&
+-       (fd_pipe2depth(format) != (enum adreno_rb_depth_format) ~0)) {
++       (fd_pipe2depth(format) != (enum adreno_rb_depth_format) ~0) &&
++       (!is_xenos(fd_screen(pscreen)) || xenos_depth_format_ok(format))) {
+       retval |= PIPE_BIND_DEPTH_STENCIL;
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+new file mode 100644
+index 0000000..f3d2d89
+--- /dev/null
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -0,0 +1,113 @@
++/*
++ * Xbox 360 Xenos render-target and resolve register encodings.
++ * Field layouts from Xenia (src/xenia/gpu/registers.h); behaviour checked against libxenon.
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef FD2_XENOS_H_
++#define FD2_XENOS_H_
++
++#include "util/format/u_format.h"
++
++/* EDRAM tile: 80x16 samples at 32bpp */
++#define XENOS_EDRAM_TILE_BYTES 5120
++
++/* RB_SURFACE_INFO: surface_pitch (pixels) [13:0], msaa_samples [17:16], hiz_pitch [31:18] */
++static inline uint32_t
++xenos_rb_surface_info(uint32_t pitch)
++{
++   return pitch & 0x3fff;
++}
++
++/* RB_COLOR_INFO: color_base (tiles) [11:0], color_format [19:16] (k_8_8_8_8 = 0) */
++static inline uint32_t
++xenos_rb_color_info(uint32_t gmem_base_bytes)
++{
++   return (gmem_base_bytes / XENOS_EDRAM_TILE_BYTES) & 0xfff;
++}
++
++/* RB_DEPTH_INFO: depth_base (tiles) [11:0], depth_format [16] (0 = D24S8) */
++static inline uint32_t
++xenos_rb_depth_info(uint32_t gmem_base_bytes)
++{
++   return (gmem_base_bytes / XENOS_EDRAM_TILE_BYTES) & 0xfff;
++}
++
++/* RB_COPY_CONTROL: copy_src_select [2:0] (0..3 color RT, 4 depth), copy_sample_select [6:4],
++ * color_clear [8], depth_clear [9], copy_command [21:20] (1 = convert, as libxenon uses) */
++static inline uint32_t
++xenos_rb_copy_control(bool depth)
++{
++   return (depth ? 4 : 0) | (1u << 20);
++}
++
++/* RB_COPY_DEST_PITCH: pitch (pixels) [13:0], height [29:16] */
++static inline uint32_t
++xenos_rb_copy_dest_pitch(uint32_t pitch, uint32_t height)
++{
++   return (pitch & 0x3fff) | ((height & 0x3fff) << 16);
++}
++
++/* RB_COPY_DEST_INFO: endian [2:0], array [3], slice [6:4], format [12:7] (texture format
++ * enum, k_8_8_8_8 = 6), number [15:13], exp_bias [21:16], swap [24].
++ * Byte order stored, measured on hardware with libxenon resolves:
++ *   endian 0, swap 1: R,G,B,A    endian 0, swap 0: B,G,R,A
++ *   endian 2 (8in32), swap 1: A,B,G,R    endian 2, swap 0: A,R,G,B */
++static inline uint32_t
++xenos_rb_copy_dest_info(enum pipe_format format)
++{
++   uint32_t endian = 0, swap = 0;
++   switch (format) {
++   case PIPE_FORMAT_R8G8B8A8_UNORM: case PIPE_FORMAT_R8G8B8X8_UNORM: swap = 1; break;
++   case PIPE_FORMAT_B8G8R8A8_UNORM: case PIPE_FORMAT_B8G8R8X8_UNORM: break;
++   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 2; swap = 1; break;
++   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; break;
++   default: break;
++   }
++   return endian | (6u << 7) | (swap << 24);
++}
++
++static inline bool
++xenos_color_format_ok(enum pipe_format format)
++{
++   switch (format) {
++   case PIPE_FORMAT_B8G8R8A8_UNORM:
++   case PIPE_FORMAT_B8G8R8X8_UNORM:
++   case PIPE_FORMAT_R8G8B8A8_UNORM:
++   case PIPE_FORMAT_R8G8B8X8_UNORM:
++   case PIPE_FORMAT_A8B8G8R8_UNORM:
++   case PIPE_FORMAT_X8B8G8R8_UNORM:
++   case PIPE_FORMAT_A8R8G8B8_UNORM:
++   case PIPE_FORMAT_X8R8G8B8_UNORM:
++      return true;
++   default:
++      return false;
++   }
++}
++
++static inline bool
++xenos_depth_format_ok(enum pipe_format format)
++{
++   return format == PIPE_FORMAT_Z24_UNORM_S8_UINT || format == PIPE_FORMAT_Z24X8_UNORM;
++}
++
++/* Texture/vertex cache invalidate over all of DRAM, as libxenon's Xe_pInvalidateGpuCache:
++ * COHER_STATUS_HOST request, COHER_SIZE/BASE_HOST, then wait for the status bit to clear.
++ * (Xenos has no a2xx TC_CNTL_STATUS at 0x0e00.) */
++#define XENOS_REG_COHER_SIZE_HOST   0x0a2f
++#define XENOS_REG_COHER_STATUS_HOST 0x0a31
++#define fd2_xenos_invalidate_caches(ring)                                      \
++   do {                                                                        \
++      OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);                          \
++      OUT_RING(ring, 0x01000000);                                              \
++      OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);                            \
++      OUT_RING(ring, 0x20000000); /* size: all of DRAM */                      \
++      OUT_RING(ring, 0x00000000); /* base */                                   \
++      OUT_PKT3(ring, CP_WAIT_REG_MEM, 5);                                      \
++      OUT_RING(ring, 0x00000003);                                              \
++      OUT_RING(ring, XENOS_REG_COHER_STATUS_HOST);                             \
++      OUT_RING(ring, 0x00000000);                                              \
++      OUT_RING(ring, 0x80000000);                                              \
++      OUT_RING(ring, 0x00000008);                                              \
++   } while (0)
++
++#endif
+diff --git a/src/gallium/drivers/freedreno/freedreno_gmem.c b/src/gallium/drivers/freedreno/freedreno_gmem.c
+index accf366..bd60cca 100644
+--- a/src/gallium/drivers/freedreno/freedreno_gmem.c
++++ b/src/gallium/drivers/freedreno/freedreno_gmem.c
+@@ -584,7 +584,7 @@ gmem_key_init(struct fd_batch *batch, bool assume_zs, bool no_scis_opt)
+    } else {
+       // TODO re-check this across gens.. maybe it should only
+       // be a single page in some cases:
+-      key->gmem_page_align = 4;
++      key->gmem_page_align = is_xenos(screen) ? 5 : 4;
+    }
+ 
+    return key;
+@@ -800,6 +800,10 @@ fd_gmem_render_tiles(struct fd_batch *batch)
+       sysmem = true;
+    }
+ 
++   /* Xenos can only render into EDRAM: anything that draws or clears goes through gmem */
++   if (is_xenos(ctx->screen) && (batch->cleared || batch->num_draws))
++      sysmem = false;
++
+    fd_reset_wfi(batch);
+ 
+    ctx->stats.batch_total++;
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.h b/src/gallium/drivers/freedreno/freedreno_screen.h
+index 4a9e724..7417123 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.h
++++ b/src/gallium/drivers/freedreno/freedreno_screen.h
+@@ -245,6 +245,13 @@ is_a20x(struct fd_screen *screen)
+    return (screen->gpu_id >= 200) && (screen->gpu_id < 210);
+ }
+ 
++/* Xbox 360 GPU: a2xx command processor and shader ISA, EDRAM render targets */
++static inline bool
++is_xenos(struct fd_screen *screen)
++{
++   return screen->gpu_id == 290;
++}
++
+ static inline bool
+ is_a2xx(struct fd_screen *screen)
+ {
+-- 
+2.53.0
+

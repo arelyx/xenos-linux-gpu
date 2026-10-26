@@ -1,0 +1,37 @@
+From: (xbox360 netboot session)
+Subject: [PATCH 2/2] powerpc/xenon: advertise AltiVec to user space
+
+The Xenon PPE threads have a VMX128 unit that executes standard AltiVec
+instructions, but CPU_FTRS_XENON lacks CPU_FTR_ALTIVEC_COMP and the cputable
+entry lacks PPC_FEATURE_HAS_ALTIVEC. Any process that uses vector
+instructions (e.g. Debian's libLLVM, loaded by Mesa) gets SIGILL from the
+vector-unavailable trap (0xf20), and glibc never selects its VMX routines.
+
+---
+diff --git a/arch/powerpc/include/asm/cputable.h b/arch/powerpc/include/asm/cputable.h
+index 883748f..489e055 100644
+--- a/arch/powerpc/include/asm/cputable.h
++++ b/arch/powerpc/include/asm/cputable.h
+@@ -464,7 +464,7 @@ static inline void cpu_feature_keys_init(void) { }
+ 	    CPU_FTR_UNALIGNED_LD_STD | CPU_FTR_DABRX)
+ #define CPU_FTRS_XENON (CPU_FTR_LWSYNC | \
+ 	    CPU_FTR_PPCAS_ARCH_V2 | CPU_FTR_CTRL | \
+-	    CPU_FTR_MMCRA | CPU_FTR_SMT | \
++	    CPU_FTR_ALTIVEC_COMP | CPU_FTR_MMCRA | CPU_FTR_SMT | \
+ 	    CPU_FTR_CELL_TB_BUG )
+ #define CPU_FTRS_PA6T (CPU_FTR_LWSYNC | \
+ 	    CPU_FTR_PPCAS_ARCH_V2 | CPU_FTR_ALTIVEC_COMP | \
+diff --git a/arch/powerpc/kernel/cpu_specs_book3s_64.h b/arch/powerpc/kernel/cpu_specs_book3s_64.h
+index b9a0797..f4158c0 100644
+--- a/arch/powerpc/kernel/cpu_specs_book3s_64.h
++++ b/arch/powerpc/kernel/cpu_specs_book3s_64.h
+@@ -504,7 +504,8 @@ static struct cpu_spec cpu_specs[] __initdata = {
+ 		.pvr_value        = 0x00710000,
+ 		.cpu_name        = "Xenon",
+ 		.cpu_features        = CPU_FTRS_XENON,
+-		.cpu_user_features    = COMMON_USER_PPC64 | PPC_FEATURE_SMT,
++		/* the PPE's VMX128 unit runs standard AltiVec code */
++		.cpu_user_features    = COMMON_USER_PPC64 | PPC_FEATURE_HAS_ALTIVEC_COMP | PPC_FEATURE_SMT,
+ 		.mmu_features        = MMU_FTRS_XENON,
+ 		.icache_bsize        = 128,
+ 		.dcache_bsize        = 128,

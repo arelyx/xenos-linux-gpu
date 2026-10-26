@@ -1,0 +1,239 @@
+From 49abd713fb96f3c25ee6b712a9abf7deec4ac703 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:07:27 -0700
+Subject: [PATCH 13/22] freedreno/xenos: tiled render targets with CPU
+ (de)tiling transfers, resolve swap fix, tiled restore texture
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c |  5 +-
+ .../drivers/freedreno/a2xx/fd2_resource.c     |  2 +
+ .../drivers/freedreno/a2xx/fd2_screen.c       |  3 +-
+ .../drivers/freedreno/a2xx/fd2_xenos.h        |  9 +-
+ .../drivers/freedreno/freedreno_resource.c    | 90 ++++++++++++++++++-
+ .../drivers/freedreno/freedreno_resource.h    |  1 +
+ 6 files changed, 102 insertions(+), 8 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 9c50635..17972f0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -269,6 +269,8 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+                         A2XX_RB_COLOR_INFO_FORMAT(fd2_pipe2color(format)));
+ 
+    /* emit fb as a texture: */
++   if (fd2_xenos)
++      fd2_xenos_align(ring, 2);
+    OUT_PKT3(ring, CP_SET_CONSTANT, 7);
+    OUT_RING(ring, 0x00010000);
+    OUT_RING(ring, A2XX_SQ_TEX_0_TYPE(SQ_TEX_TYPE_VALID_TEXTURE) |
+@@ -276,7 +278,8 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+                      A2XX_SQ_TEX_0_CLAMP_Y(SQ_TEX_WRAP) |
+                      A2XX_SQ_TEX_0_CLAMP_Z(SQ_TEX_WRAP) |
+                      A2XX_SQ_TEX_0_PITCH(
+-                        fdl2_pitch_pixels(&rsc->layout, psurf->level)));
++                        fdl2_pitch_pixels(&rsc->layout, psurf->level)) |
++                     COND(rsc->layout.tile_mode, A2XX_SQ_TEX_0_TILED));
+    OUT_RELOC(ring, rsc->bo, offset,
+              A2XX_SQ_TEX_1_FORMAT(fd2_pipe2surface(format).format) |
+                 A2XX_SQ_TEX_1_CLAMP_POLICY(SQ_TEX_CLAMP_POLICY_OGL),
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+index e6d4900..3f709b1 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+@@ -18,6 +18,8 @@ fd2_layout_resource(struct fd_resource *rsc, enum fd_layout_type type)
+    uint32_t level, size = 0;
+ 
+    fd_resource_layout_init(prsc);
++   if (is_xenos(fd_screen(prsc->screen)))
++      rsc->layout.tile_mode = (type == FD_LAYOUT_TILED);
+ 
+    /* 32 pixel alignment */
+    fdl_set_pitchalign(&rsc->layout, fdl_cpp_shift(&rsc->layout) + 5);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 0f41060..1f94153 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -111,7 +111,8 @@ fd2_screen_init(struct pipe_screen *pscreen)
+    pscreen->is_format_supported = fd2_screen_is_format_supported;
+ 
+    screen->layout_resource = fd2_layout_resource;
+-   if (FD_DBG(TTILE))
++   /* Xenos resolves only write the tiled layout: tiling is not optional there */
++   if (FD_DBG(TTILE) || fd2_xenos)
+       screen->tile_mode = fd2_tile_mode;
+ 
+    fd2_emit_init_screen(pscreen);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index b2a950c..0637a2c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -58,10 +58,11 @@ xenos_rb_copy_dest_info(enum pipe_format format)
+ {
+    uint32_t endian = 0, swap = 0;
+    switch (format) {
+-   case PIPE_FORMAT_R8G8B8A8_UNORM: case PIPE_FORMAT_R8G8B8X8_UNORM: swap = 1; break;
+-   case PIPE_FORMAT_B8G8R8A8_UNORM: case PIPE_FORMAT_B8G8R8X8_UNORM: break;
+-   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 2; swap = 1; break;
+-   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; break;
++   /* swap per hardware (26 Oct 2026): swap 0 writes R,G,B,A bytes for an RGBA target */
++   case PIPE_FORMAT_R8G8B8A8_UNORM: case PIPE_FORMAT_R8G8B8X8_UNORM: break;
++   case PIPE_FORMAT_B8G8R8A8_UNORM: case PIPE_FORMAT_B8G8R8X8_UNORM: swap = 1; break;
++   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 2; break;
++   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; swap = 1; break;
+    default: break;
+    }
+    return endian | (6u << 7) | (swap << 24);
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 29134ba..c2ddfb1 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -190,7 +190,7 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
+    struct fd_screen *screen = fd_screen(rsc->b.b.screen);
+    uint32_t flags =
+       ((prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE) |
+-      COND(rsc->layout.tile_mode, FD_BO_NOMAP) |
++      COND(rsc->layout.tile_mode && !is_xenos(screen), FD_BO_NOMAP) |   /* Xenos (de)tiles on the CPU */
+       COND((prsc->usage == PIPE_USAGE_STAGING) &&
+            (prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT),
+            FD_BO_CACHED_COHERENT) |
+@@ -700,6 +700,9 @@ fd_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
+    fd_resource_wait(ctx, rsc, FD_BO_PREP_FLUSH);
+ }
+ 
++static void xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *box,
++                            uint8_t *linear, unsigned stride, bool to_linear);
++
+ static void
+ fd_resource_transfer_unmap(struct pipe_context *pctx,
+                            struct pipe_transfer *ptrans)
+@@ -709,6 +712,13 @@ fd_resource_transfer_unmap(struct pipe_context *pctx,
+    struct fd_resource *rsc = fd_resource(ptrans->resource);
+    struct fd_transfer *trans = fd_transfer(ptrans);
+ 
++   if (trans->xenos_linear) {
++      if (ptrans->usage & PIPE_MAP_WRITE)
++         xenos_tile_copy(rsc, ptrans->level, &ptrans->box, trans->xenos_linear, ptrans->stride, false);
++      free(trans->xenos_linear);
++      trans->xenos_linear = NULL;
++   }
++
+    if (trans->staging_prsc) {
+       if (ptrans->usage & PIPE_MAP_WRITE)
+          fd_blit_from_staging(ctx, trans);
+@@ -753,6 +763,71 @@ valid_range(struct fd_resource *rsc, const struct pipe_box *box)
+    return util_ranges_intersect(&rsc->valid_buffer_range, box->x, box->x + box->width);
+ }
+ 
++
++/* Xbox 360 Xenos: resolves always write the GPU's 2D tiled layout and textures
++ * are fetched tiled, so CPU access to a tiled resource (de)tiles here instead of
++ * going through a GPU staging blit (which would resolve tiled data into the
++ * "linear" staging buffer). XGAddress2DTiledOffset, as in libxenon/Xenia;
++ * returns a texel index. */
++static inline uint32_t
++xenos_tiled_texel(uint32_t x, uint32_t y, uint32_t pitch_px, uint32_t cpp)
++{
++   uint32_t aw = (pitch_px + 31) & ~31u;
++   uint32_t lb = (cpp >> 2) + ((cpp >> 1) >> (cpp >> 2));
++   uint32_t macro = ((x >> 5) + (y >> 5) * (aw >> 5)) << (lb + 7);
++   uint32_t micro = ((x & 7) + ((y & 6) << 2)) << lb;
++   uint32_t off = macro + ((micro & ~15u) << 1) + (micro & 15) + ((y & 8) << (3 + lb)) + ((y & 1) << 4);
++   return (((off & ~511u) << 3) + ((off & 448) << 2) + (off & 63) + ((y & 16) << 7) +
++           (((((y & 8) >> 2) + (x >> 3)) & 3) << 6)) >> lb;
++}
++
++static void
++xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *box,
++                uint8_t *linear, unsigned stride, bool to_linear)
++{
++   uint8_t *tiled = (uint8_t *)fd_bo_map(rsc->bo) + fd_resource_offset(rsc, level, box->z);
++   unsigned cpp = rsc->layout.cpp;
++   unsigned pitch_px = fd_resource_pitch(rsc, level) / cpp;
++   for (int y = 0; y < box->height; y++) {
++      for (int x = 0; x < box->width; x++) {
++         uint8_t *t = tiled + (size_t)xenos_tiled_texel(box->x + x, box->y + y, pitch_px, cpp) * cpp;
++         uint8_t *l = linear + (size_t)y * stride + (size_t)x * cpp;
++         if (to_linear)
++            memcpy(l, t, cpp);
++         else
++            memcpy(t, l, cpp);
++      }
++   }
++}
++
++static void *
++resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prsc,
++                            unsigned level, unsigned usage, const struct pipe_box *box,
++                            struct fd_transfer *trans) assert_dt
++{
++   struct fd_context *ctx = fd_context(pctx);
++   struct fd_resource *rsc = fd_resource(prsc);
++   unsigned stride = box->width * rsc->layout.cpp;
++
++   if (pending(rsc, !!(usage & PIPE_MAP_WRITE)))
++      flush_resource(ctx, rsc, usage);
++   fd_resource_wait(ctx, rsc, translate_usage(usage));
++
++   if (getenv("XENOS_DEBUG"))
++      fprintf(stderr, "xenos map %p %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
++              box->width, box->height, box->x, box->y, level, usage, rsc->layout.cpp, fd_resource_pitch(rsc, level));
++   trans->xenos_linear = malloc((size_t)stride * box->height);
++   if (!trans->xenos_linear)
++      return NULL;
++   trans->b.b.stride = stride;
++   trans->b.b.layer_stride = stride * box->height;
++   if (usage & PIPE_MAP_READ)
++      xenos_tile_copy(rsc, level, box, trans->xenos_linear, stride, true);
++   if (usage & PIPE_MAP_WRITE)
++      rsc->valid = true;
++   return trans->xenos_linear;
++}
++
+ static void *
+ resource_transfer_map_staging(struct pipe_context *pctx,
+                               struct pipe_resource *prsc,
+@@ -861,7 +936,9 @@ resource_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+     * splitting a batch.. for ex, mid-frame texture uploads to a tiled
+     * texture.
+     */
+-   if (rsc->layout.tile_mode) {
++   if (rsc->layout.tile_mode && is_xenos(ctx->screen) && box->depth == 1) {
++      return resource_transfer_map_xenos(pctx, prsc, level, usage, box, trans);
++   } else if (rsc->layout.tile_mode) {
+       return resource_transfer_map_staging(pctx, prsc, level, usage, box, trans);
+    } else if ((usage & PIPE_MAP_READ) && !fd_bo_is_cached(rsc->bo)) {
+       perf_debug_ctx(ctx, "wc readback: prsc=%p, level=%u, usage=%x, box=%dx%d+%d,%d",
+@@ -1285,6 +1362,15 @@ get_best_layout(struct fd_screen *screen,
+    if (!screen->tile_mode(tmpl))
+       return FD_LAYOUT_LINEAR;
+ 
++   /* Xbox 360: a resolve always writes the tiled layout, so anything that can
++    * be rendered to must be tiled, staging and "linear" requests included.
++    * CPU access goes through the CPU (de)tiling transfer path. */
++   if (getenv("XENOS_DEBUG"))
++      fprintf(stderr, "xenos layout %ux%u bind %x usage %u\n", tmpl->width0, tmpl->height0, tmpl->bind, tmpl->usage);
++   if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
++       tmpl->target != PIPE_BUFFER)
++      return FD_LAYOUT_TILED;
++
+    if ((tmpl->target == PIPE_BUFFER) ||
+        (tmpl->target == PIPE_TEXTURE_1D) ||
+        (tmpl->target == PIPE_TEXTURE_1D_ARRAY))
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.h b/src/gallium/drivers/freedreno/freedreno_resource.h
+index d3ad635..ba038a3 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.h
++++ b/src/gallium/drivers/freedreno/freedreno_resource.h
+@@ -285,6 +285,7 @@ struct fd_transfer {
+    struct pipe_resource *staging_prsc;
+    struct pipe_box staging_box;
+    void *upload_ptr;
++   void *xenos_linear;   /* Xbox 360: CPU-side linear copy of a tiled surface */
+ };
+ 
+ static inline struct fd_transfer *
+-- 
+2.53.0
+

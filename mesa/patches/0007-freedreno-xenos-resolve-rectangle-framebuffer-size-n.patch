@@ -1,0 +1,45 @@
+From c42df77dc32c5ee528eb0e3edd111389baa362fa Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 16:23:22 -0700
+Subject: [PATCH 07/22] freedreno/xenos: resolve rectangle = framebuffer size,
+ not the padded bin
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index b84fef6..bf85441 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -208,12 +208,19 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
+    OUT_RING(ring, 0x00000000);
+ 
+-   OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+-   OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
+-   OUT_RING(ring, fui((float)gmem->bin_w / 2.0f)); /* XSCALE */
+-   OUT_RING(ring, fui((float)gmem->bin_w / 2.0f)); /* XOFFSET */
+-   OUT_RING(ring, fui((float)gmem->bin_h / 2.0f)); /* YSCALE */
+-   OUT_RING(ring, fui((float)gmem->bin_h / 2.0f)); /* YOFFSET */
++   {
++      /* Xenos: the resolve copies exactly the rectangle drawn, and the bin is
++       * padded to whole EDRAM tile pairs, so cover the framebuffer, not the bin
++       * (a bin-sized rect would write past the end of the destination). */
++      float rw = is_xenos(ctx->screen) ? (float)pfb->width : (float)gmem->bin_w;
++      float rh = is_xenos(ctx->screen) ? (float)pfb->height : (float)gmem->bin_h;
++      OUT_PKT3(ring, CP_SET_CONSTANT, 5);
++      OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
++      OUT_RING(ring, fui(rw / 2.0f)); /* XSCALE */
++      OUT_RING(ring, fui(rw / 2.0f)); /* XOFFSET */
++      OUT_RING(ring, fui(rh / 2.0f)); /* YSCALE */
++      OUT_RING(ring, fui(rh / 2.0f)); /* YOFFSET */
++   }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
+-- 
+2.53.0
+

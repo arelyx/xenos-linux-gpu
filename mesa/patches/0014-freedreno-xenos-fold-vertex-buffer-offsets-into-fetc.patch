@@ -1,0 +1,182 @@
+From 5a0458b758276d6d8cf5bc85ff7458b90ea0dae7 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:28:22 -0700
+Subject: [PATCH 14/22] freedreno/xenos: fold vertex buffer offsets into fetch
+ instructions, per-BO invalidates, post-resolve cache flush, invalidate before
+ shader loads, no mini fetch/prefetch
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c   | 13 ++++++++++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c   |  6 ++++--
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c   | 16 ++++++++++++++++
+ .../drivers/freedreno/a2xx/fd2_program.c        |  9 +++++++++
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h  | 17 +++++++++++++++++
+ .../drivers/freedreno/a2xx/ir2_assemble.c       |  7 +++++++
+ 6 files changed, 65 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 126452a..a5ae181 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -55,7 +55,9 @@ emit_vertexbufs(struct fd_context *ctx) assert_dt
+    for (i = 0; i < vtx->num_elements; i++) {
+       struct pipe_vertex_element *elem = &vtx->pipe[i];
+       struct pipe_vertex_buffer *vb = &vertexbuf->vb[elem->vertex_buffer_index];
+-      bufs[i].offset = vb->buffer_offset;
++      /* Xenos: fetch from the start of the BO; the buffer offset goes into the
++       * fetch instruction's offset (fd2_program.c patch_vtx_fetch) */
++      bufs[i].offset = is_xenos(ctx->screen) ? 0 : vb->buffer_offset;
+       bufs[i].size = fd_bo_size(fd_resource(vb->buffer.resource)->bo);
+       bufs[i].prsc = vb->buffer.resource;
+    }
+@@ -78,6 +80,15 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
++      /* and each vertex buffer exactly, as libxenon does on unlock */
++      struct fd_vertex_stateobj *vtx = ctx->vtx.vtx;
++      for (unsigned i = 0; vtx && i < vtx->num_elements; i++) {
++         struct pipe_vertex_buffer *vb = &ctx->vtx.vertexbuf.vb[vtx->pipe[i].vertex_buffer_index];
++         if (vb->buffer.resource) {
++            struct fd_bo *bo = fd_resource(vb->buffer.resource)->bo;
++            fd2_xenos_invalidate_bo(ring, bo, fd_bo_size(bo));
++         }
++      }
+    } else {
+       OUT_PKT0(ring, REG_A2XX_TC_CNTL_STATUS, 1);
+       OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 6609666..da3cdb2 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -223,7 +223,8 @@ fd2_emit_state_binning(struct fd_context *ctx,
+ 
+    /* subset of fd2_emit_state needed for hw binning on a20x */
+ 
+-   if (dirty & (FD_DIRTY_PROG | FD_DIRTY_VTXSTATE | FD_DIRTY_TEXSTATE))
++   if (dirty & (FD_DIRTY_PROG | FD_DIRTY_VTXSTATE | FD_DIRTY_TEXSTATE |
++                (fd2_xenos ? FD_DIRTY_VTXBUF : 0)))   /* Xenos: buffer offsets live in the shader */
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+@@ -382,7 +383,8 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       }
+    }
+ 
+-   if (dirty & (FD_DIRTY_PROG | FD_DIRTY_VTXSTATE | FD_DIRTY_TEXSTATE))
++   if (dirty & (FD_DIRTY_PROG | FD_DIRTY_VTXSTATE | FD_DIRTY_TEXSTATE |
++                (fd2_xenos ? FD_DIRTY_VTXBUF : 0)))   /* Xenos: buffer offsets live in the shader */
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 17972f0..53301c0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -114,6 +114,22 @@ emit_gmem2mem_surf(struct fd_batch *batch, uint32_t base,
+       OUT_RING(ring, 0); /* VGT_MIN_VTX_INDX */
+       fd_draw(batch, ring, DI_PT_RECTLIST, IGNORE_VISIBILITY,
+               DI_SRC_SEL_AUTO_INDEX, 3, 0, INDEX_SIZE_IGN, 0, 0, NULL);
++      /* as libxenon's Xe_ResolveInto: cache flush event, then flush the GPU's
++       * caches over the destination (COHER 0x03000100) and wait for it, or the
++       * resolved pixels may not have reached memory when the fence passes */
++      OUT_PKT3(ring, CP_EVENT_WRITE, 1);
++      OUT_RING(ring, CACHE_FLUSH);
++      OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);
++      OUT_RING(ring, 0x03000100);
++      OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);
++      OUT_RING(ring, fd_resource_slice(rsc, psurf->level)->size0);
++      OUT_RELOC(ring, rsc->bo, offset, 0, 0);   /* COHER_BASE_HOST */
++      OUT_PKT3(ring, CP_WAIT_REG_MEM, 5);
++      OUT_RING(ring, 0x00000003);
++      OUT_RING(ring, XENOS_REG_COHER_STATUS_HOST);
++      OUT_RING(ring, 0x00000000);
++      OUT_RING(ring, 0x80000000);
++      OUT_RING(ring, 0x00000008);
+       return;
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index a7033c6..065cb03 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -20,6 +20,7 @@
+ #include "ir2/instr-a2xx.h"
+ #include "fd2_context.h"
+ #include "fd2_program.h"
++#include "fd2_emit.h"
+ #include "util/u_endian.h"
+ #include "util/u_math.h"
+ #include "fd2_texture.h"
+@@ -58,6 +59,12 @@ emit(struct fd_ringbuffer *ring, mesa_shader_stage type,
+          fclose(f);
+       }
+    }
++   if (fd2_xenos) {
++      /* libxenon issues INVALIDATE_STATE 0x100 before loading a shader with
++       * IM_LOAD_IMMEDIATE; without it a reloaded shader may not take effect */
++      OUT_PKT3(ring, CP_INVALIDATE_STATE, 1);
++      OUT_RING(ring, 0x00000100);
++   }
+    OUT_PKT3(ring, CP_IM_LOAD_IMMEDIATE, 2 + info->sizedwords);
+    OUT_RING(ring, type == MESA_SHADER_FRAGMENT);
+    OUT_RING(ring, info->sizedwords);
+@@ -158,6 +165,8 @@ patch_vtx_fetch(struct fd_context *ctx, struct pipe_vertex_element *elem,
+    unsigned div = is_xenos(ctx->screen) ? 4 : 1;
+    instr->stride = elem->src_stride / div;
+    instr->offset = elem->src_offset / div;
++   if (is_xenos(ctx->screen))   /* the fetch constant points at the BO start, see fd2_draw.c */
++      instr->offset += ctx->vtx.vertexbuf.vb[elem->vertex_buffer_index].buffer_offset / 4;
+ }
+ 
+ static void
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 0637a2c..819e81b 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -112,4 +112,21 @@ xenos_depth_format_ok(enum pipe_format format)
+       OUT_RING(ring, 0x00000008);                                              \
+    } while (0)
+ 
++/* Same, over one buffer object (libxenon invalidates exact ranges when a vertex or
++ * index buffer is unlocked; the all-of-DRAM form is only used once at init) */
++#define fd2_xenos_invalidate_bo(ring, bo, size)                                \
++   do {                                                                        \
++      OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);                          \
++      OUT_RING(ring, 0x01000000);                                              \
++      OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);                            \
++      OUT_RING(ring, ((size) + 0x1fff) & ~0x1fffu);                            \
++      OUT_RELOC(ring, bo, 0, 0, 0);                                            \
++      OUT_PKT3(ring, CP_WAIT_REG_MEM, 5);                                      \
++      OUT_RING(ring, 0x00000003);                                              \
++      OUT_RING(ring, XENOS_REG_COHER_STATUS_HOST);                             \
++      OUT_RING(ring, 0x00000000);                                              \
++      OUT_RING(ring, 0x80000000);                                              \
++      OUT_RING(ring, 0x00000008);                                              \
++   } while (0)
++
+ #endif
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index 4115aae..ef175bb 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -186,6 +186,13 @@ fill_instr(struct ir2_context *ctx, struct ir2_sched_instr *sched, instr_t *bc,
+           */
+          vtx->reserved3 = instr->idx ? 0x1 : 0x0;
+          vtx->reserved0 = instr->idx ? 0x2 : 0x3;
++         /* Xenos: reserved3 is is_mini_fetch (reuse the previous fetch's address,
++          * wrong when attributes live in different buffers) and reserved0 is the
++          * prefetch count; libxenon's shaders use full fetches, prefetch 0 */
++         if (ctx->so->is_xenos) {
++            vtx->reserved3 = 0;
++            vtx->reserved0 = 0;
++         }
+       } else if (instr->fetch.opc == TEX_FETCH) {
+          instr_fetch_tex_t *tex = &bc->fetch.tex;
+ 
+-- 
+2.53.0
+

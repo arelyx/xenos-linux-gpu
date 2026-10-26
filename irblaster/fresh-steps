@@ -1,0 +1,12 @@
+#!/bin/bash
+# Run each replay step on a freshly power-cycled console (no state carried between steps).
+# Usage: fresh-steps step1.xrp step2.xrp ...   Results appended to netboot/fresh-results.log
+R=${XBOX_RESULTS_LOG:-$HOME/xbox-fresh-results.log}
+SSH="ssh -o ConnectTimeout=5 ${XBOX_SSH_OPTS:-} root@${XBOX_HOST:-10.0.0.206}"
+for s in "$@"; do
+  $(dirname "$(readlink -f "$0")")/xbox-cycle force >/dev/null || { echo "$(date +%T) $s: CYCLE FAILED" | tee -a $R; exit 1; }
+  out=$(timeout 60 $SSH "/opt/xegpu/steps/run.sh $s 2000 2>&1; echo rc=\$?" 2>&1)
+  res=$(echo "$out" | grep -E "fence ok|FENCE TIMEOUT|readback" | tr '\n' ' ')
+  [ -z "$res" ] && res="NO ANSWER (console frozen?) $(echo "$out" | tail -1)"
+  echo "$(date +%T) $s: $res" | tee -a $R
+done

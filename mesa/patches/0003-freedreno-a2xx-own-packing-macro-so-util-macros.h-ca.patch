@@ -1,0 +1,195 @@
+From 1f2644647df961e4bedd9fa915210b3705373de8 Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 14:02:28 -0700
+Subject: [PATCH 03/22] freedreno/a2xx: own packing macro so util/macros.h
+ can't drop the LE storage order; debug hooks
+
+instr-a2xx.h included util/macros.h (via fd2_hw.h) after defining PACKED, which
+silently redefined it, so the big-endian layout was not applied. Verified with
+drm-shim: all 14 shaders from the GLES2 smoke test are byte-identical between an
+x86 build and a ppc64 build run under qemu (FD2_DUMP_SHADERS, FD2_DEBUG_FETCH).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/freedreno/ir2/instr-a2xx.h                | 35 ++++++++++---------
+ .../drivers/freedreno/a2xx/fd2_program.c      | 18 ++++++++++
+ 2 files changed, 36 insertions(+), 17 deletions(-)
+
+diff --git a/src/freedreno/ir2/instr-a2xx.h b/src/freedreno/ir2/instr-a2xx.h
+index feb3d44..cddbfd7 100644
+--- a/src/freedreno/ir2/instr-a2xx.h
++++ b/src/freedreno/ir2/instr-a2xx.h
+@@ -11,10 +11,11 @@
+  * little-endian compiler would, so their bytes are the same image.
+  */
+ #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+-#define PACKED __attribute__((__packed__, scalar_storage_order("little-endian")))
++#define A2XX_PACKED __attribute__((__packed__, scalar_storage_order("little-endian")))
+ #else
+-#define PACKED __attribute__((__packed__))
++#define A2XX_PACKED __attribute__((__packed__))
+ #endif
++/* (own macro name: util/macros.h, pulled in below, redefines PACKED) */
+ 
+ #include "fd2_hw.h"
+ 
+@@ -110,7 +111,7 @@ typedef enum {
+    VECTOR_NONE = 31,
+ } instr_vector_opc_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    /* dword0: */
+    uint8_t vector_dest : 6;
+    uint8_t vector_dest_rel : 1;
+@@ -135,8 +136,8 @@ typedef struct PACKED {
+    uint8_t const_1_rel_abs : 1;
+    uint8_t const_0_rel_abs : 1;
+    /* dword2: */
+-   union PACKED {
+-      struct PACKED {
++   union A2XX_PACKED {
++      struct A2XX_PACKED {
+          uint8_t src3_reg : 6;
+          uint8_t src3_reg_select : 1;
+          uint8_t src3_reg_abs : 1;
+@@ -148,7 +149,7 @@ typedef struct PACKED {
+          uint8_t src1_reg_abs : 1;
+       };
+       /* constants have full 8-bit index */
+-      struct PACKED {
++      struct A2XX_PACKED {
+          uint8_t src3_reg_byte : 8;
+          uint8_t src2_reg_byte : 8;
+          uint8_t src1_reg_byte : 8;
+@@ -195,7 +196,7 @@ typedef enum {
+    SQ_MEMORY = 3,
+ } instr_alloc_type_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    uint16_t address : 9;
+    uint8_t reserved0 : 3;
+    uint8_t count : 3;
+@@ -208,7 +209,7 @@ typedef struct PACKED {
+    instr_cf_opc_t opc : 4;
+ } instr_cf_exec_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    uint16_t address : 10;
+    uint8_t reserved0 : 6;
+    uint8_t loop_id : 5;
+@@ -217,7 +218,7 @@ typedef struct PACKED {
+    instr_cf_opc_t opc : 4;
+ } instr_cf_loop_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    uint16_t address : 10;
+    uint8_t reserved0 : 3;
+    uint8_t force_call : 1;
+@@ -230,7 +231,7 @@ typedef struct PACKED {
+    instr_cf_opc_t opc : 4;
+ } instr_cf_jmp_call_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    uint8_t size : 4;
+    uint64_t reserved0 : 36;
+    uint8_t no_serial : 1;
+@@ -239,12 +240,12 @@ typedef struct PACKED {
+    instr_cf_opc_t opc : 4;
+ } instr_cf_alloc_t;
+ 
+-typedef union PACKED {
++typedef union A2XX_PACKED {
+    instr_cf_exec_t exec;
+    instr_cf_loop_t loop;
+    instr_cf_jmp_call_t jmp_call;
+    instr_cf_alloc_t alloc;
+-   struct PACKED {
++   struct A2XX_PACKED {
+       uint64_t dummy : 44;
+       instr_cf_opc_t opc : 4;
+    };
+@@ -301,7 +302,7 @@ typedef enum {
+ 
+ typedef enum a2xx_sq_surfaceformat instr_surf_fmt_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    /* dword0: */
+    instr_fetch_opc_t opc : 5;
+    uint32_t src_reg : 6;
+@@ -335,7 +336,7 @@ typedef struct PACKED {
+    uint8_t pred_condition : 1;
+ } instr_fetch_tex_t;
+ 
+-typedef struct PACKED {
++typedef struct A2XX_PACKED {
+    /* dword0: */
+    instr_fetch_opc_t opc : 5;
+    uint32_t src_reg : 6;
+@@ -365,10 +366,10 @@ typedef struct PACKED {
+    uint8_t pred_condition : 1;
+ } instr_fetch_vtx_t;
+ 
+-typedef union PACKED {
++typedef union A2XX_PACKED {
+    instr_fetch_tex_t tex;
+    instr_fetch_vtx_t vtx;
+-   struct PACKED {
++   struct A2XX_PACKED {
+       /* dword0: */
+       instr_fetch_opc_t opc : 5;
+       uint32_t dummy0 : 27;
+@@ -381,7 +382,7 @@ typedef union PACKED {
+    };
+ } instr_fetch_t;
+ 
+-typedef union PACKED {
++typedef union A2XX_PACKED {
+    instr_alu_t alu;
+    instr_fetch_t fetch;
+ } instr_t;
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index de52e93..d878ae4 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -46,6 +46,18 @@ emit(struct fd_ringbuffer *ring, mesa_shader_stage type,
+ 
+    assert(info->sizedwords);
+ 
++   if (getenv("FD2_DUMP_SHADERS")) {
++      /* debug: append the shader's little-endian byte image, for cross-arch comparison */
++      FILE *f = fopen(getenv("FD2_DUMP_SHADERS"), "a");
++      if (f) {
++         fprintf(f, "type=%d dwords=%u\n", type, info->sizedwords);
++         const uint8_t *b = (const uint8_t *)info->dwords;
++         for (unsigned k = 0; k < info->sizedwords * 4; k++)
++            fprintf(f, "%02x%s", b[k], (k % 12) == 11 ? "\n" : "");
++         fprintf(f, "\n");
++         fclose(f);
++      }
++   }
+    OUT_PKT3(ring, CP_IM_LOAD_IMMEDIATE, 2 + info->sizedwords);
+    OUT_RING(ring, type == MESA_SHADER_FRAGMENT);
+    OUT_RING(ring, info->sizedwords);
+@@ -157,6 +169,12 @@ patch_fetches(struct fd_context *ctx, struct ir2_shader_info *info,
+       if (instr->opc == VTX_FETCH) {
+          unsigned idx =
+             (instr->vtx.const_index - 20) * 3 + instr->vtx.const_index_sel;
++         if (getenv("FD2_DEBUG_FETCH")) {
++            const uint8_t *b = (const uint8_t *)&info->dwords[fi->offset];
++            fprintf(stderr, "patch_fetches %p i=%d off=%d bytes=%02x%02x%02x%02x %02x%02x%02x%02x const_index=%u sel=%u idx=%u\n",
++                    (void *)info, i, fi->offset, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
++                    (unsigned)instr->vtx.const_index, (unsigned)instr->vtx.const_index_sel, idx);
++         }
+          patch_vtx_fetch(ctx, &vtx->pipe[idx], &instr->vtx, fi->vtx.dst_swiz);
+          continue;
+       }
+-- 
+2.53.0
+

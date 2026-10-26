@@ -1,0 +1,6 @@
+# Cases skipped in full runs because a case of the same class wedged the GPU (each hang costs a ~3 min IR power cycle).
+# Remove a line once the class is fixed.
+# ETC1 cases exhaust the console memory (deqp killed with 137, console stops answering)
+etc1
+# cube mipmap filtering: deqp verification on the Xenon CPU exceeds the batch timeout (killed, 431 s each)
+texture\.filtering\.cube\..*mipmap

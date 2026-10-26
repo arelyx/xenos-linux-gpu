@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+"""Send a command to the Xbox IR blaster. Usage: xir p | e | guide | c XX | mce [XX] | r HEX N """
+import sys, time, termios, os
+dev = os.environ.get('XIR_DEV', '/dev/ttyACM0')
+fd = os.open(dev, os.O_RDWR | os.O_NOCTTY)
+a = termios.tcgetattr(fd)
+a[0] = 0; a[1] = 0; a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL; a[3] = 0
+a[4] = a[5] = termios.B115200
+a[6][termios.VMIN] = 0; a[6][termios.VTIME] = 1
+termios.tcsetattr(fd, termios.TCSANOW, a)
+time.sleep(2.0)                      # opening the port resets the Uno; wait for the bootloader
+termios.tcflush(fd, termios.TCIFLUSH)
+args = sys.argv[1:]
+cmd = {'p': '0C', 'e': '28', 'guide': '64'}.get(args[0], None) if args else None
+mce = bool(args) and args[0] in ('m', 'mce')
+if mce: cmd = args[1] if len(args) > 1 else '0C'
+if cmd or (args and args[0] == 'c'):
+    # alternate the RC6 toggle bit across calls (opening the port resets the Uno)
+    st = os.path.expanduser('~/.cache/xir-toggle')
+    try: tg = open(st).read().strip() == '1'
+    except OSError: tg = False
+    open(st, 'w').write('0' if tg else '1')
+    line = '%s %s %d' % ('m' if mce else 'c', cmd or args[1], tg)
+else:
+    line = ' '.join(args)
+os.write(fd, (line + '\n').encode())
+out = b''; t = time.time()
+while time.time() - t < 1.5 and not out.endswith(b'\n'):
+    out += os.read(fd, 256)
+print(out.decode(errors='replace').strip() or '(no reply)')

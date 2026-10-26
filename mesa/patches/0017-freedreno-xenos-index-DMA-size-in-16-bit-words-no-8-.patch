@@ -1,0 +1,163 @@
+From 0df53e567bf37dd54c2a51797b9bf08c893d28c8 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 01:47:13 -0700
+Subject: [PATCH 17/22] freedreno/xenos: index DMA size in 16-bit words, no
+ 8-bit indices, resolve endian 3 for byte-reversed formats
+
+- VGT_DMA_SIZE counts 16-bit words on Xenos (libxenon: count << indextype); bytes made
+  dEQP buffer.write cases wedge the GPU.
+- VGT_DRAW_INITIATOR has a one-bit index size on Xenos: report R8_UINT index buffers
+  unsupported so u_vbuf rewrites them.
+- Resolve endian 3 reverses dword bytes (2 swaps halves), measured with dEQP color_clear
+  on an A8R8G8B8 pbuffer across all endian/swap combinations; XENOS_RESOLVE_<fmt>=<e><s>
+  override for experiments.
+- GLES on big-endian accepts GL_BGRA + UNSIGNED_INT_8_8_8_8_REV (glamor).
+- XENOS_DEBUG prints formats.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c  |  5 ++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h   | 14 ++++++++++++--
+ src/gallium/drivers/freedreno/freedreno_draw.h   |  4 ++++
+ .../drivers/freedreno/freedreno_resource.c       |  8 +++++---
+ src/mesa/main/glformats.c                        | 16 +++++++++++++++-
+ 5 files changed, 40 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 1f94153..a2aaec9 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -65,8 +65,11 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+       retval |= PIPE_BIND_DEPTH_STENCIL;
+    }
+ 
++   /* Xenos fetches 16- and 32-bit indices only (VGT_DRAW_INITIATOR has a
++    * one-bit index size); 8-bit index buffers are rewritten by u_vbuf */
+    if ((usage & PIPE_BIND_INDEX_BUFFER) &&
+-       (fd_pipe2index(format) != (enum pc_di_index_size) ~0)) {
++       (fd_pipe2index(format) != (enum pc_di_index_size) ~0) &&
++       !(is_xenos(fd_screen(pscreen)) && format == PIPE_FORMAT_R8_UINT)) {
+       retval |= PIPE_BIND_INDEX_BUFFER;
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 038db05..5025850 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -62,10 +62,20 @@ xenos_rb_copy_dest_info(enum pipe_format format)
+    /* swap per hardware (26 Oct 2026): swap 0 writes R,G,B,A bytes for an RGBA target */
+    case PIPE_FORMAT_R8G8B8A8_UNORM: case PIPE_FORMAT_R8G8B8X8_UNORM: break;
+    case PIPE_FORMAT_B8G8R8A8_UNORM: case PIPE_FORMAT_B8G8R8X8_UNORM: swap = 1; break;
+-   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 2; break;
+-   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 2; swap = 1; break;
++   /* Resolve endian 3 reverses the bytes of each dword and 2 swaps its halves (measured on
++    * hardware 26 Oct 2026 with dEQP color_clear on an A8R8G8B8 pbuffer, all 8 combinations;
++    * Xenia's Endian128 names 2 "8in32"). */
++   case PIPE_FORMAT_A8B8G8R8_UNORM: case PIPE_FORMAT_X8B8G8R8_UNORM: endian = 3; break;
++   case PIPE_FORMAT_A8R8G8B8_UNORM: case PIPE_FORMAT_X8R8G8B8_UNORM: endian = 3; swap = 1; break;
+    default: break;
+    }
++   /* experiment hook: XENOS_RESOLVE_<FMT>=<endian><swap>, e.g. XENOS_RESOLVE_A8R8G8B8_UNORM=21 */
++   {
++      char name[64];
++      snprintf(name, sizeof(name), "XENOS_RESOLVE_%s", util_format_name(format) + 12);
++      const char *e = getenv(name);
++      if (e && e[0] && e[1]) { endian = e[0] - '0'; swap = e[1] - '0'; }
++   }
+    return endian | (6u << 7) | (swap << 24);
+ }
+ 
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.h b/src/gallium/drivers/freedreno/freedreno_draw.h
+index d566a9a..22d7538 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.h
++++ b/src/gallium/drivers/freedreno/freedreno_draw.h
+@@ -112,6 +112,10 @@ fd_draw(struct fd_batch *batch, struct fd_ringbuffer *ring,
+       else if (idx_type == INDEX_SIZE_32_BIT)
+          idx_swap = 2u << 30;   /* 8in32 */
+ #endif
++      /* Xenos VGT_DMA_SIZE counts 16-bit words, not bytes (libxenon writes
++       * count << indextype; Xenia's VGT_DMA_SIZE.num_words) */
++      if (is_xenos(batch->ctx->screen))
++         idx_size /= 2;
+       OUT_RELOC(ring, fd_resource(idx_buffer)->bo, idx_offset, 0, 0);
+       OUT_RING(ring, idx_size | idx_swap);
+    }
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index c2ddfb1..4276c31 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -814,8 +814,9 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+    fd_resource_wait(ctx, rsc, translate_usage(usage));
+ 
+    if (getenv("XENOS_DEBUG"))
+-      fprintf(stderr, "xenos map %p %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
+-              box->width, box->height, box->x, box->y, level, usage, rsc->layout.cpp, fd_resource_pitch(rsc, level));
++      fprintf(stderr, "xenos map %p %s %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
++              util_format_short_name(prsc->format), box->width, box->height, box->x, box->y, level, usage,
++              rsc->layout.cpp, fd_resource_pitch(rsc, level));
+    trans->xenos_linear = malloc((size_t)stride * box->height);
+    if (!trans->xenos_linear)
+       return NULL;
+@@ -1366,7 +1367,8 @@ get_best_layout(struct fd_screen *screen,
+     * be rendered to must be tiled, staging and "linear" requests included.
+     * CPU access goes through the CPU (de)tiling transfer path. */
+    if (getenv("XENOS_DEBUG"))
+-      fprintf(stderr, "xenos layout %ux%u bind %x usage %u\n", tmpl->width0, tmpl->height0, tmpl->bind, tmpl->usage);
++      fprintf(stderr, "xenos layout %s %ux%u bind %x usage %u\n", util_format_short_name(tmpl->format),
++              tmpl->width0, tmpl->height0, tmpl->bind, tmpl->usage);
+    if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
+        tmpl->target != PIPE_BUFFER)
+       return FD_LAYOUT_TILED;
+diff --git a/src/mesa/main/glformats.c b/src/mesa/main/glformats.c
+index 022d47a..5cdd792 100644
+--- a/src/mesa/main/glformats.c
++++ b/src/mesa/main/glformats.c
+@@ -27,6 +27,7 @@
+ 
+ #include "context.h"
+ #include "glformats.h"
++#include "util/u_endian.h"
+ #include "formats.h"
+ #include "texcompress.h"
+ #include "enums.h"
+@@ -2374,6 +2375,11 @@ _mesa_es_error_check_format_and_type(const struct gl_context *ctx,
+ 
+    case GL_BGRA:
+       type_valid = (type == GL_UNSIGNED_BYTE);
++#if UTIL_ARCH_BIG_ENDIAN
++      /* big-endian hosts: X's ARGB32 words are BGRA/8_8_8_8_REV, which
++       * GLES has no other way to name (used by glamor on the Xbox 360) */
++      type_valid = type_valid || type == GL_UNSIGNED_INT_8_8_8_8_REV;
++#endif
+ 
+       /* This feels like a bug in the EXT_texture_format_BGRA8888 spec, but
+        * the format does not appear to be allowed for 3D textures in OpenGL
+@@ -2839,6 +2845,10 @@ static GLenum
+ gles_effective_internal_format_for_format_and_type(GLenum format,
+                                                    GLenum type)
+ {
++   #if UTIL_ARCH_BIG_ENDIAN
++   if (format == GL_BGRA && type == GL_UNSIGNED_INT_8_8_8_8_REV)
++      return GL_BGRA;
++#endif
+    switch (type) {
+    case GL_UNSIGNED_BYTE:
+       switch (format) {
+@@ -3190,7 +3200,11 @@ _mesa_gles_error_check_format_and_type(struct gl_context *ctx,
+ 
+    switch (format) {
+    case GL_BGRA:
+-      if (type != GL_UNSIGNED_BYTE ||
++      if ((type != GL_UNSIGNED_BYTE
++#if UTIL_ARCH_BIG_ENDIAN
++           && type != GL_UNSIGNED_INT_8_8_8_8_REV
++#endif
++          ) ||
+               (internalFormat != GL_BGRA &&
+                internalFormat != GL_RGBA8 &&
+                internalFormat != GL_BGRA8_EXT &&
+-- 
+2.53.0
+

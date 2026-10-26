@@ -1,0 +1,141 @@
+From 25b4d802991e04fa13bee13a33c62a705445c5b8 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 17:23:00 -0700
+Subject: [PATCH 10/22] freedreno/xenos: no A220-only registers
+ (LRZ_VSC_CONTROL, SAMPLE_POS, CLEAR_COLOR, vertex reuse), blend-disable as
+ ONE/ZERO, clear color via shader constant
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ .../drivers/freedreno/a2xx/fd2_blend.c        |  7 +++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c | 23 ++++++++++++++++---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 10 ++++----
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c |  4 ++--
+ 4 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_blend.c b/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
+index 67956c4..38bd9a5 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
+@@ -87,8 +87,13 @@ fd2_blend_state_create(struct pipe_context *pctx,
+    if (rt->colormask & PIPE_MASK_A)
+       so->rb_colormask |= A2XX_RB_COLOR_MASK_WRITE_ALPHA;
+ 
+-   if (!rt->blend_enable)
++   if (!rt->blend_enable) {
+       so->rb_colorcontrol |= A2XX_RB_COLORCONTROL_BLEND_DISABLE;
++      /* Xenos has no BLEND_DISABLE bit (pad in RB_COLORCONTROL): "disabled"
++       * is src ONE, dst ZERO, as libxenon programs it */
++      if (is_xenos(fd_context(pctx)->screen))
++         so->rb_blendcontrol = 0x00010001;
++   }
+ 
+    if (cso->dither)
+       so->rb_colorcontrol |= A2XX_RB_COLORCONTROL_DITHER_MODE(DITHER_ALWAYS);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 63a0cc0..a4ef434 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -316,11 +316,20 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_BLEND_CONTROL));
+-   OUT_RING(ring, 0);
++   OUT_RING(ring, is_xenos(ctx->screen) ? 0x00010001 : 0);   /* Xenos: ONE/ZERO, no disable bit */
+ 
+    if (is_a20x(batch->ctx->screen))
+       return;
+ 
++   if (is_xenos(ctx->screen)) {
++      /* the A220 registers below do not exist on Xenos: 0x2209 is RB_BLENDCONTROL1 */
++      OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++      OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
++      OUT_RING(ring, 3);
++      OUT_RING(ring, 0);
++      return;
++   }
++
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
+    OUT_RING(ring, 3); /* VGT_MAX_VTX_INDX */
+@@ -347,6 +356,13 @@ clear_state_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+    if (is_a20x(ctx->screen))
+       return;
+ 
++   if (is_xenos(ctx->screen)) {
++      OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++      OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_CONTROL));
++      OUT_RING(ring, 0x00000000);
++      return;
++   }
++
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_CONTROL));
+    OUT_RING(ring, 0x00000000);
+@@ -553,8 +569,9 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+    if (fd2_clear_fast(ctx, buffers, color, depth, stencil))
+       goto dirty;
+ 
+-   /* set clear value */
+-   if (is_a20x(ctx->screen)) {
++   /* set clear value (Xenos: through the shader constant like a20x; the
++    * A22x CLEAR_COLOR register is RB_BLENDCONTROL3 there) */
++   if (is_a20x(ctx->screen) || is_xenos(ctx->screen)) {
+       if (buffers & FD_BUFFER_COLOR) {
+          /* C0 used by fragment shader */
+          OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index f5967fd..2ef61c6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -417,7 +417,7 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_OUT_DEALLOC_CNTL));
+       OUT_RING(ring, 0x00000002);
+-   } else {
++   } else if (!is_xenos(ctx->screen)) { /* libxenon never sets it */
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_VERTEX_REUSE_BLOCK_CNTL));
+       OUT_RING(ring, 0x0000003b);
+@@ -485,9 +485,11 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
+    OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(COLOR_DEPTH));
+ 
+-   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+-   OUT_RING(ring, CP_REG(REG_A2XX_RB_SAMPLE_POS));
+-   OUT_RING(ring, 0x88888888);
++   if (!is_xenos(ctx->screen)) { /* 0x220a is RB_BLENDCONTROL2 on Xenos */
++      OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++      OUT_RING(ring, CP_REG(REG_A2XX_RB_SAMPLE_POS));
++      OUT_RING(ring, 0x88888888);
++   }
+ 
+    if (!is_xenos(ctx->screen)) { /* not a Xenos register */
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index bf85441..9c50635 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -175,7 +175,7 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
+    OUT_RING(ring, 0);
+ 
+-   if (!is_a20x(ctx->screen)) {
++   if (!is_a20x(ctx->screen) && !is_xenos(ctx->screen)) { /* libxenon never sets it */
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_VERTEX_REUSE_BLOCK_CNTL));
+       OUT_RING(ring, 0x0000028f);
+@@ -236,7 +236,7 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
+    OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(COLOR_DEPTH));
+ 
+-   if (!is_a20x(ctx->screen)) {
++   if (!is_a20x(ctx->screen) && !is_xenos(ctx->screen)) { /* libxenon never sets it */
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_VERTEX_REUSE_BLOCK_CNTL));
+       OUT_RING(ring, 0x0000003b);
+-- 
+2.53.0
+

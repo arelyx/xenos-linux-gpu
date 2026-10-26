@@ -1,0 +1,35 @@
+diff --git a/external/vulkancts/framework/vulkan/vkImageUtil.cpp b/external/vulkancts/framework/vulkan/vkImageUtil.cpp
+index 5cce3dc..e0a166d 100644
+--- a/external/vulkancts/framework/vulkan/vkImageUtil.cpp
++++ b/external/vulkancts/framework/vulkan/vkImageUtil.cpp
+@@ -1154,7 +1154,7 @@ PlanarFormatDescription getCorePlanarFormatDescription(VkFormat format)
+     DE_ASSERT(de::inBounds<uint32_t>(format, VK_FORMAT_UNDEFINED + 1, VK_CORE_FORMAT_LAST));
+ 
+ #if (DE_ENDIANNESS != DE_LITTLE_ENDIAN)
+-#error "Big-endian is not supported"
++/* big-endian: Vulkan-only code, unused by the GLES modules (Xbox 360 build) */
+ #endif
+ 
+     switch (format)
+@@ -3605,7 +3605,7 @@ tcu::TextureFormat mapVkFormat(VkFormat format)
+     case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+         return TextureFormat(TextureFormat::sRGBA, TextureFormat::UNORM_INT8);
+ #else
+-#error "Big-endian not supported"
++/* big-endian: Vulkan-only code, unused by the GLES modules (Xbox 360 build) */
+ #endif
+ 
+     case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+diff --git a/framework/delibs/debase/deDefs.c b/framework/delibs/debase/deDefs.c
+index e1eff67..12f25f0 100644
+--- a/framework/delibs/debase/deDefs.c
++++ b/framework/delibs/debase/deDefs.c
+@@ -38,7 +38,7 @@ DE_STATIC_ASSERT(sizeof(intptr_t) == sizeof(void *));
+ DE_STATIC_ASSERT(DE_PTR_SIZE == sizeof(void *));
+ 
+ /* Sanity checks for DE_PTR_SIZE & DE_CPU */
+-#if !((DE_CPU == DE_CPU_X86_64 || DE_CPU == DE_CPU_ARM_64 || DE_CPU == DE_CPU_MIPS_64 || DE_CPU == DE_CPU_RISCV_64) && \
++#if DE_CPU != DE_CPU_VANILLA && !((DE_CPU == DE_CPU_X86_64 || DE_CPU == DE_CPU_ARM_64 || DE_CPU == DE_CPU_MIPS_64 || DE_CPU == DE_CPU_RISCV_64) && \
+       (DE_PTR_SIZE == 8)) &&                                                                                           \
+     !((DE_CPU == DE_CPU_X86 || DE_CPU == DE_CPU_ARM || DE_CPU == DE_CPU_MIPS || DE_CPU == DE_CPU_RISCV_32) &&          \
+       (DE_PTR_SIZE == 4))

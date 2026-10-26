@@ -1,0 +1,74 @@
+From 722f1a93ffca2ac8f7523e5c35ed1dd5da84d246 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 17:11:39 -0700
+Subject: [PATCH 09/22] freedreno/xenos: vertex fetch stride/offset in dwords;
+ no 0x80 'zero registers' encoding
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_program.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index d878ae4..eb8cc85 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -153,8 +153,10 @@ patch_vtx_fetch(struct fd_context *ctx, struct pipe_vertex_element *elem,
+    instr->num_format_all = fmt.num_format;
+    instr->format = fmt.format;
+    instr->exp_adjust_all = fmt.exp_adjust;
+-   instr->stride = elem->src_stride;
+-   instr->offset = elem->src_offset;
++   /* Adreno 200 takes the fetch stride and offset in bytes, Xenos in dwords */
++   unsigned div = is_xenos(ctx->screen) ? 4 : 1;
++   instr->stride = elem->src_stride / div;
++   instr->offset = elem->src_offset / div;
+ }
+ 
+ static void
+@@ -278,11 +280,11 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+ 
+    if (fp) {
+       emit(ring, MESA_SHADER_FRAGMENT, fpi, NULL);
+-      fs_gprs = (fpi->max_reg < 0) ? 0x80 : fpi->max_reg;
++      fs_gprs = (fpi->max_reg < 0) ? (is_xenos(ctx->screen) ? 0 : 0x80) : fpi->max_reg;
+       vs_export = MAX2(1, f->inputs_count) - 1;
+    }
+ 
+-   vs_gprs = (vpi->max_reg < 0) ? 0x80 : vpi->max_reg;
++   vs_gprs = (vpi->max_reg < 0) ? (is_xenos(ctx->screen) ? 0 : 0x80) : vpi->max_reg;
+ 
+    if (vp->writes_psize && !binning)
+       mode = POSITION_2_VECTORS_SPRITE;
+@@ -343,7 +345,7 @@ fd2_prog_init(struct pipe_context *pctx)
+    instr->const_index_sel = 0;
+    instr->format = FMT_32_32_32_FLOAT;
+    instr->format_comp_all = false;
+-   instr->stride = 12;
++   instr->stride = is_xenos(ctx->screen) ? 3 : 12;
+    instr->num_format_all = true;
+    instr->dst_swiz = IR2_FETCH_SWIZ_XYZ1;
+ 
+@@ -358,7 +360,7 @@ fd2_prog_init(struct pipe_context *pctx)
+    instr->const_index_sel = 1;
+    instr->format = FMT_32_32_FLOAT;
+    instr->format_comp_all = false;
+-   instr->stride = 8;
++   instr->stride = is_xenos(ctx->screen) ? 2 : 8;
+    instr->num_format_all = false;
+    instr->dst_swiz = IR2_FETCH_SWIZ_XY01;
+ 
+@@ -367,7 +369,7 @@ fd2_prog_init(struct pipe_context *pctx)
+    instr->const_index_sel = 0;
+    instr->format = FMT_32_32_32_FLOAT;
+    instr->format_comp_all = false;
+-   instr->stride = 12;
++   instr->stride = is_xenos(ctx->screen) ? 3 : 12;
+    instr->num_format_all = false;
+    instr->dst_swiz = IR2_FETCH_SWIZ_XYZ1;
+ }
+-- 
+2.53.0
+

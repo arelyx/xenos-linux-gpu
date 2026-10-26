@@ -1,0 +1,321 @@
+From 150037e93ae8b6a6bb3cb7e9bf9bc81864ba3899 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:51:27 -0700
+Subject: [PATCH 12/22] freedreno/xenos: ALU constants in whole 16-constant
+ blocks from a context shadow, fetch constants in whole 6-dword groups,
+ Xe_pAlign-style alignment, vertex fetch bit 28, no fast clear
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ .../drivers/freedreno/a2xx/fd2_context.h      |   5 +
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  18 +--
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 128 ++++++++++--------
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.h |   4 +
+ .../drivers/freedreno/a2xx/fd2_screen.c       |   1 +
+ 5 files changed, 91 insertions(+), 65 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_context.h b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+index f41bc5f..90dd41a 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_context.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+@@ -20,6 +20,11 @@ struct fd2_context {
+    struct pipe_resource *solid_vertexbuf;
+ 
+    bool mag_switchover_half;
++
++   /* Xenos: shadow of the 512 ALU constants. The hardware only takes constant
++    * writes in whole 16-constant blocks (a 3-constant write hangs it), so every
++    * update rewrites its blocks from this copy. */
++   uint32_t xenos_alu[2048];
+ };
+ 
+ static inline struct fd2_context *
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index a4ef434..126452a 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -410,12 +410,9 @@ clear_fast(struct fd_batch *batch, struct fd_ringbuffer *ring,
+    } else {
+       const float sc = 1.0f / 255.0f;
+ 
+-      OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+-      OUT_RING(ring, 0x00000480);
+-      OUT_RING(ring, fui((float)(color_clear >> 0 & 0xff) * sc));
+-      OUT_RING(ring, fui((float)(color_clear >> 8 & 0xff) * sc));
+-      OUT_RING(ring, fui((float)(color_clear >> 16 & 0xff) * sc));
+-      OUT_RING(ring, fui((float)(color_clear >> 24 & 0xff) * sc));
++      uint32_t cc[4] = { fui((float)(color_clear >> 0 & 0xff) * sc), fui((float)(color_clear >> 8 & 0xff) * sc),
++                         fui((float)(color_clear >> 16 & 0xff) * sc), fui((float)(color_clear >> 24 & 0xff) * sc) };
++      fd2_emit_alu_consts(batch->ctx, ring, 0x480, cc, 4);
+ 
+       // XXX if using float the rounding error breaks it..
+       float depth = ((double)(depth_clear >> 8)) * (1.0 / (double)0xffffff);
+@@ -461,6 +458,8 @@ fd2_clear_fast(struct fd_context *ctx, unsigned buffers,
+     * if the bpp of the color/depth doesn't match
+     * we clear with depth/color individually
+     */
++   if (is_xenos(ctx->screen))
++      return false;   /* MSAA/RB_COPY tricks not validated on Xenos; use the plain clear */
+    struct fd2_context *fd2_ctx = fd2_context(ctx);
+    struct fd_batch *batch = ctx->batch;
+    struct fd_ringbuffer *ring = batch->draw;
+@@ -574,12 +573,7 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+    if (is_a20x(ctx->screen) || is_xenos(ctx->screen)) {
+       if (buffers & FD_BUFFER_COLOR) {
+          /* C0 used by fragment shader */
+-         OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+-         OUT_RING(ring, 0x00000480);
+-         OUT_RING(ring, color->ui[0]);
+-         OUT_RING(ring, color->ui[1]);
+-         OUT_RING(ring, color->ui[2]);
+-         OUT_RING(ring, color->ui[3]);
++         fd2_emit_alu_consts(ctx, ring, 0x480, color->ui, 4);
+       }
+ 
+       if (buffers & FD_BUFFER_DEPTH) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 2ef61c6..6609666 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -28,11 +28,47 @@
+  * driver doesn't seem to change these dynamically, and I can't really
+  * think of a good reason to so..
+  */
++
++bool fd2_xenos;   /* set by fd2_screen_init on Xbox 360 */
++
++/* Pad with type-2 NOPs until the next dword is at (dword offset % 4) == rem.
++ * libxenon (Xe_pAlign) starts all constant data 16-byte aligned. Ring chunks
++ * are at least 64-byte aligned, so the offset inside the ring is enough. */
++void
++fd2_xenos_align(struct fd_ringbuffer *ring, unsigned rem)
++{
++   while (((ring->cur - ring->start) & 3) != rem)
++      OUT_RING(ring, 0x80000000);
++}
++
++/* ALU constants: SET_CONSTANT on Adreno; on Xenos whole 64-dword blocks from
++ * the context shadow, written with type-0 packets to 0x4000+ as libxenon does. */
++void
++fd2_emit_alu_consts(struct fd_context *ctx, struct fd_ringbuffer *ring,
++                    uint32_t base, const uint32_t *vals, unsigned n)
++{
++   if (!is_xenos(ctx->screen)) {
++      OUT_PKT3(ring, CP_SET_CONSTANT, n + 1);
++      OUT_RING(ring, base);
++      for (unsigned i = 0; i < n; i++)
++         OUT_RING(ring, vals[i]);
++      return;
++   }
++   uint32_t *sh = fd2_context(ctx)->xenos_alu;
++   assert(base + n <= 2048);
++   memcpy(sh + base, vals, n * 4);
++   unsigned b0 = base & ~63u, b1 = align(base + n, 64);
++   fd2_xenos_align(ring, 3);
++   OUT_PKT0(ring, 0x4000 + b0, b1 - b0);
++   for (unsigned i = b0; i < b1; i++)
++      OUT_RING(ring, sh[i]);
++}
++
+ #define VS_CONST_BASE 0x20
+ #define PS_CONST_BASE 0x120
+ 
+ static void
+-emit_constants(struct fd_ringbuffer *ring, uint32_t base,
++emit_constants(struct fd_context *ctx, struct fd_ringbuffer *ring, uint32_t base,
+                struct fd_constbuf_stateobj *constbuf,
+                struct fd2_shader_stateobj *shader)
+ {
+@@ -68,10 +104,8 @@ emit_constants(struct fd_ringbuffer *ring, uint32_t base,
+ 
+       dwords = (uint32_t *)(((uint8_t *)dwords) + cb->buffer_offset);
+ 
+-      OUT_PKT3(ring, CP_SET_CONSTANT, size + 1);
+-      OUT_RING(ring, base);
+-      for (i = 0; i < size; i++)
+-         OUT_RING(ring, *(dwords++));
++      fd2_emit_alu_consts(ctx, ring, base, dwords, size);
++      dwords += size;
+ 
+       base += size;
+       enabled_mask &= ~(1 << index);
+@@ -80,12 +114,8 @@ emit_constants(struct fd_ringbuffer *ring, uint32_t base,
+    /* emit shader immediates: */
+    if (shader) {
+       for (i = 0; i < shader->num_immediates; i++) {
+-         OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+-         OUT_RING(ring, start_base + (4 * (shader->first_immediate + i)));
+-         OUT_RING(ring, shader->immediates[i].val[0]);
+-         OUT_RING(ring, shader->immediates[i].val[1]);
+-         OUT_RING(ring, shader->immediates[i].val[2]);
+-         OUT_RING(ring, shader->immediates[i].val[3]);
++         fd2_emit_alu_consts(ctx, ring, start_base + (4 * (shader->first_immediate + i)),
++                             shader->immediates[i].val, 4);
+          base += 4;
+       }
+    }
+@@ -115,6 +145,8 @@ emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+ 
+    rsc = view->base.texture ? fd_resource(view->base.texture) : NULL;
+ 
++   if (fd2_xenos)
++      fd2_xenos_align(ring, 2);
+    OUT_PKT3(ring, CP_SET_CONSTANT, 7);
+    OUT_RING(ring, 0x00010000 + (0x6 * const_idx));
+ 
+@@ -159,7 +191,13 @@ fd2_emit_vertex_bufs(struct fd_ringbuffer *ring, uint32_t val,
+ {
+    unsigned i;
+ 
+-   OUT_PKT3(ring, CP_SET_CONSTANT, 1 + (2 * n));
++   /* Xenos: fetch constants only in whole 6-dword groups (a 2-dword write
++    * made later resolves write nowhere, 26 Oct 2026); pad with zero fetches */
++   unsigned pad = fd2_xenos ? (3 - n % 3) % 3 : 0;
++   assert(!fd2_xenos || (val % 6) == 0);
++   if (fd2_xenos)
++      fd2_xenos_align(ring, 2);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 1 + (2 * (n + pad)));
+    OUT_RING(ring, (0x1 << 16) | (val & 0xffff));
+    for (i = 0; i < n; i++) {
+       struct fd_resource *rsc = fd_resource(vbufs[i].prsc);
+@@ -167,7 +205,12 @@ fd2_emit_vertex_bufs(struct fd_ringbuffer *ring, uint32_t val,
+       /* low two bits: endian swap. Big-endian hosts write 32-bit attributes
+        * natively, so fetch them 8in32 (byte-sized formats would need a
+        * per-element swizzle instead; floats are the common case) */
+-      OUT_RING(ring, vbufs[i].size | (UTIL_ARCH_BIG_ENDIAN ? SQ_TEX_ENDIAN_8IN32 : 0));
++      OUT_RING(ring, vbufs[i].size | (UTIL_ARCH_BIG_ENDIAN ? SQ_TEX_ENDIAN_8IN32 : 0) |
++                     (fd2_xenos ? 0x10000000 : 0));   /* libxenon VERTEX_FETCH sets bit 28 */
++   }
++   for (i = 0; i < pad; i++) {
++      OUT_RING(ring, 0);
++      OUT_RING(ring, 0);
+    }
+ }
+ 
+@@ -184,7 +227,7 @@ fd2_emit_state_binning(struct fd_context *ctx,
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+-      emit_constants(ring, VS_CONST_BASE * 4,
++      emit_constants(ctx, ring, VS_CONST_BASE * 4,
+                      &ctx->constbuf[MESA_SHADER_VERTEX],
+                      (dirty & FD_DIRTY_PROG) ? ctx->prog.vs : NULL);
+    }
+@@ -192,16 +235,11 @@ fd2_emit_state_binning(struct fd_context *ctx,
+    if (dirty & FD_DIRTY_VIEWPORT) {
+       struct pipe_viewport_state *vp = & ctx->viewport[0];
+ 
+-      OUT_PKT3(ring, CP_SET_CONSTANT, 9);
+-      OUT_RING(ring, 0x00000184);
+-      OUT_RING(ring, fui(vp->translate[0]));
+-      OUT_RING(ring, fui(vp->translate[1]));
+-      OUT_RING(ring, fui(vp->translate[2]));
+-      OUT_RING(ring, fui(0.0f));
+-      OUT_RING(ring, fui(vp->scale[0]));
+-      OUT_RING(ring, fui(vp->scale[1]));
+-      OUT_RING(ring, fui(vp->scale[2]));
+-      OUT_RING(ring, fui(0.0f));
++      {
++         uint32_t vpc[8] = { fui(vp->translate[0]), fui(vp->translate[1]), fui(vp->translate[2]), fui(0.0f),
++                             fui(vp->scale[0]), fui(vp->scale[1]), fui(vp->scale[2]), fui(0.0f) };
++         fd2_emit_alu_consts(ctx, ring, 0x184, vpc, 8);
++      }
+    }
+ 
+    /* not sure why this is needed */
+@@ -337,28 +375,21 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       OUT_RING(ring, fui(vp->translate[2])); /* PA_CL_VPORT_ZOFFSET */
+ 
+       /* set viewport in C65/C66, for a20x hw binning and fragcoord.z */
+-      OUT_PKT3(ring, CP_SET_CONSTANT, 9);
+-      OUT_RING(ring, 0x00000184);
+-
+-      OUT_RING(ring, fui(vp->translate[0]));
+-      OUT_RING(ring, fui(vp->translate[1]));
+-      OUT_RING(ring, fui(vp->translate[2]));
+-      OUT_RING(ring, fui(0.0f));
+-
+-      OUT_RING(ring, fui(vp->scale[0]));
+-      OUT_RING(ring, fui(vp->scale[1]));
+-      OUT_RING(ring, fui(vp->scale[2]));
+-      OUT_RING(ring, fui(0.0f));
++      {
++         uint32_t vpc[8] = { fui(vp->translate[0]), fui(vp->translate[1]), fui(vp->translate[2]), fui(0.0f),
++                             fui(vp->scale[0]), fui(vp->scale[1]), fui(vp->scale[2]), fui(0.0f) };
++         fd2_emit_alu_consts(ctx, ring, 0x184, vpc, 8);
++      }
+    }
+ 
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_VTXSTATE | FD_DIRTY_TEXSTATE))
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+-      emit_constants(ring, VS_CONST_BASE * 4,
++      emit_constants(ctx, ring, VS_CONST_BASE * 4,
+                      &ctx->constbuf[MESA_SHADER_VERTEX],
+                      (dirty & FD_DIRTY_PROG) ? ctx->prog.vs : NULL);
+-      emit_constants(ring, PS_CONST_BASE * 4,
++      emit_constants(ctx, ring, PS_CONST_BASE * 4,
+                      &ctx->constbuf[MESA_SHADER_FRAGMENT],
+                      (dirty & FD_DIRTY_PROG) ? ctx->prog.fs : NULL);
+    }
+@@ -543,21 +574,12 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+       OUT_RING(ring, 0x80000180);
+    }
+ 
+-   /* not sure what this form of CP_SET_CONSTANT is.. */
+-   OUT_PKT3(ring, CP_SET_CONSTANT, 13);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x469c4000);
+-   OUT_RING(ring, 0x3f800000);
+-   OUT_RING(ring, 0x3f000000);
+-   OUT_RING(ring, 0x00000000);
+-   OUT_RING(ring, 0x40000000);
+-   OUT_RING(ring, 0x3f400000);
+-   OUT_RING(ring, 0x3ec00000);
+-   OUT_RING(ring, 0x3e800000);
++   /* not sure what this form of CP_SET_CONSTANT is.. (ALU constants c0-c2) */
++   {
++      static const uint32_t c[12] = { 0, 0, 0, 0, 0x469c4000, 0x3f800000, 0x3f000000, 0,
++                                      0x40000000, 0x3f400000, 0x3ec00000, 0x3e800000 };
++      fd2_emit_alu_consts(ctx, ring, 0, c, 12);
++   }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_MASK));
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+index 5b2a8f2..517f79d 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+@@ -20,6 +20,10 @@ struct fd2_vertex_buf {
+    struct pipe_resource *prsc;
+ };
+ 
++void fd2_emit_alu_consts(struct fd_context *ctx, struct fd_ringbuffer *ring,
++                         uint32_t base, const uint32_t *vals, unsigned n);
++void fd2_xenos_align(struct fd_ringbuffer *ring, unsigned rem);
++extern bool fd2_xenos;
+ void fd2_emit_vertex_bufs(struct fd_ringbuffer *ring, uint32_t val,
+                           struct fd2_vertex_buf *vbufs, uint32_t n);
+ void fd2_emit_state_binning(struct fd_context *ctx,
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index c943d2b..0f41060 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -103,6 +103,7 @@ static const enum pc_di_primtype a20x_primtypes[MESA_PRIM_COUNT] = {
+ void
+ fd2_screen_init(struct pipe_screen *pscreen)
+ {
++   fd2_xenos = is_xenos(fd_screen(pscreen));
+    struct fd_screen *screen = fd_screen(pscreen);
+ 
+    screen->max_rts = 1;
+-- 
+2.53.0
+

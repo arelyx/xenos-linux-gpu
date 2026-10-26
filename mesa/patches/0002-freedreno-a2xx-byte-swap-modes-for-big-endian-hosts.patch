@@ -1,0 +1,107 @@
+From 07a7a68a42c07c036fee4b4d2ab4717f9e454b99 Mon Sep 17 00:00:00 2001
+From: xenos <xenos@localhost>
+Date: Sun, 25 Oct 2026 13:52:29 -0700
+Subject: [PATCH 02/22] freedreno/a2xx: byte-swap modes for big-endian hosts
+
+Index buffers 8in16/8in32, vertex buffers 8in32, textures by component size.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c   |  6 +++++-
+ .../drivers/freedreno/a2xx/fd2_texture.c        | 17 +++++++++++++++++
+ src/gallium/drivers/freedreno/freedreno_draw.h  | 11 ++++++++++-
+ 3 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index ac24ddf..ed6ddf0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -16,6 +16,7 @@
+ #include "fd2_blend.h"
+ #include "fd2_context.h"
+ #include "fd2_emit.h"
++#include "util/u_endian.h"
+ #include "fd2_program.h"
+ #include "fd2_rasterizer.h"
+ #include "fd2_texture.h"
+@@ -162,7 +163,10 @@ fd2_emit_vertex_bufs(struct fd_ringbuffer *ring, uint32_t val,
+    for (i = 0; i < n; i++) {
+       struct fd_resource *rsc = fd_resource(vbufs[i].prsc);
+       OUT_RELOC(ring, rsc->bo, vbufs[i].offset, 3, 0);
+-      OUT_RING(ring, vbufs[i].size);
++      /* low two bits: endian swap. Big-endian hosts write 32-bit attributes
++       * natively, so fetch them 8in32 (byte-sized formats would need a
++       * per-element swizzle instead; floats are the common case) */
++      OUT_RING(ring, vbufs[i].size | (UTIL_ARCH_BIG_ENDIAN ? SQ_TEX_ENDIAN_8IN32 : 0));
+    }
+ }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+index 436a3a5..771feab 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+@@ -13,6 +13,8 @@
+ 
+ #include "fd2_context.h"
+ #include "fd2_texture.h"
++#include "util/u_endian.h"
++#include "util/format/u_format.h"
+ #include "fd2_util.h"
+ 
+ static enum sq_tex_clamp
+@@ -172,6 +174,21 @@ fd2_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
+               COND(rsc->layout.tile_mode, A2XX_SQ_TEX_0_TILED);
+    so->tex1 = A2XX_SQ_TEX_1_FORMAT(fmt.format) |
+               A2XX_SQ_TEX_1_CLAMP_POLICY(SQ_TEX_CLAMP_POLICY_OGL);
++#if UTIL_ARCH_BIG_ENDIAN
++   {
++      /* texels written by a big-endian CPU: swap within each component */
++      const struct util_format_description *d = util_format_description(cso->format);
++      unsigned csz = d->channel[0].size;
++      if (d->block.bits == 16 && d->nr_channels > 1)
++         csz = 16;   /* packed 16-bit formats (565, 4444) are one word */
++      if (d->block.bits == 32 && csz < 8)
++         csz = 32;   /* packed 32-bit formats (10_10_10_2) */
++      if (csz == 16)
++         so->tex1 |= A2XX_SQ_TEX_1_ENDIANNESS(SQ_TEX_ENDIAN_8IN16);
++      else if (csz == 32)
++         so->tex1 |= A2XX_SQ_TEX_1_ENDIANNESS(SQ_TEX_ENDIAN_8IN32);
++   }
++#endif
+    so->tex2 = A2XX_SQ_TEX_2_HEIGHT(prsc->height0 - 1) |
+               A2XX_SQ_TEX_2_WIDTH(prsc->width0 - 1) |
+               COND(prsc->target == PIPE_TEXTURE_CUBE, A2XX_SQ_TEX_2_DEPTH(6));
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.h b/src/gallium/drivers/freedreno/freedreno_draw.h
+index 3f2bcba..2b58fd9 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.h
++++ b/src/gallium/drivers/freedreno/freedreno_draw.h
+@@ -13,6 +13,7 @@
+ #include "pipe/p_state.h"
+ 
+ #include "freedreno_context.h"
++#include "util/u_endian.h"
+ #include "freedreno_resource.h"
+ #include "freedreno_screen.h"
+ #include "freedreno_util.h"
+@@ -97,8 +98,16 @@ fd_draw(struct fd_batch *batch, struct fd_ringbuffer *ring,
+    }
+ 
+    if (idx_buffer) {
++      uint32_t idx_swap = 0;
++#if UTIL_ARCH_BIG_ENDIAN
++      /* index DMA byte swap (bits 31:30): native big-endian indices */
++      if (idx_type == INDEX_SIZE_16_BIT)
++         idx_swap = 1u << 30;   /* 8in16 */
++      else if (idx_type == INDEX_SIZE_32_BIT)
++         idx_swap = 2u << 30;   /* 8in32 */
++#endif
+       OUT_RELOC(ring, fd_resource(idx_buffer)->bo, idx_offset, 0, 0);
+-      OUT_RING(ring, idx_size);
++      OUT_RING(ring, idx_size | idx_swap);
+    }
+ 
+    emit_marker(ring, 7);
+-- 
+2.53.0
+

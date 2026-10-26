@@ -1,0 +1,49 @@
+From d6fb1cffeeb3d5b18f8fb02d527db5a230458bf8 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 02:45:29 -0700
+Subject: [PATCH 19/22] freedreno/xenos: own primitive table, no native line
+ loops (Xenos 7 is triangle-with-W-flags)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 4172991..b846df9 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -106,6 +106,17 @@ static const enum pc_di_primtype a20x_primtypes[MESA_PRIM_COUNT] = {
+    [MESA_PRIM_TRIANGLE_STRIP] = DI_PT_TRISTRIP,
+    [MESA_PRIM_TRIANGLE_FAN]   = DI_PT_TRIFAN,
+ };
++
++/* Xenos (Xenia xenos::PrimitiveType): 7 is "triangle with W flags", not a line loop
++ * (line loop is 0x0c there, untested), so line loops are left to Mesa's conversion */
++static const enum pc_di_primtype xenos_primtypes[MESA_PRIM_COUNT] = {
++   [MESA_PRIM_POINTS]         = DI_PT_POINTLIST_PSIZE,
++   [MESA_PRIM_LINES]          = DI_PT_LINELIST,
++   [MESA_PRIM_LINE_STRIP]     = DI_PT_LINESTRIP,
++   [MESA_PRIM_TRIANGLES]      = DI_PT_TRILIST,
++   [MESA_PRIM_TRIANGLE_STRIP] = DI_PT_TRISTRIP,
++   [MESA_PRIM_TRIANGLE_FAN]   = DI_PT_TRIFAN,
++};
+ /* clang-format on */
+ 
+ void
+@@ -125,7 +136,9 @@ fd2_screen_init(struct pipe_screen *pscreen)
+ 
+    fd2_emit_init_screen(pscreen);
+ 
+-   if (screen->gpu_id >= 220) {
++   if (fd2_xenos) {
++      screen->primtypes = xenos_primtypes;
++   } else if (screen->gpu_id >= 220) {
+       screen->primtypes = a22x_primtypes;
+    } else {
+       screen->primtypes = a20x_primtypes;
+-- 
+2.53.0
+
