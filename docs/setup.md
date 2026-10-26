@@ -88,7 +88,7 @@ meson setup build-mesa src/mesa --cross-file mesa/mesa-ppc64-cross.ini \
 ninja -C build-mesa && DESTDIR=/srv/nfs/xenon ninja -C build-mesa install
 ```
 
-The cross file uses `-mcpu=970 -mtune=cell -mno-altivec`. Don't use `-mcpu=cell` (see footguns). On the console: `LD_LIBRARY_PATH=/opt/mesa-xenos/lib`. Useful environment: `XENOS_DEBUG=1` (layouts and maps), `XENOS_COHER=<hex>`, `XENOS_RESOLVE_<FORMAT>=<endian><swap>`, `XENOS_INTERP=<hex>` (experiment hooks), `FD_MESA_DEBUG=disasm`, `FD_RD_DUMP=enable,full FD_RD_DUMP_PATH=...`.
+The cross file uses `-mcpu=970 -mtune=cell -mno-altivec`. Don't use `-mcpu=cell` (see footguns). On the console: `LD_LIBRARY_PATH=/opt/mesa-xenos/lib`. Useful environment: `XENOS_DEBUG=1` (layouts and maps), `XENOS_COHER=<hex>`, `XENOS_RESOLVE_<FORMAT>=<endian><swap>`, `XENOS_INTERP=<hex>` (experiment hooks), `XENOS_FLUSH_BARRIER=1` (texture barriers flush the batch, as upstream freedreno does), `XENOS_BLIT_MIN_PIXELS=<n>` (texture transfers smaller than n pixels use the CPU path), `FD_MESA_DEBUG=disasm`, `FD_RD_DUMP=enable,full FD_RD_DUMP_PATH=...`.
 
 ## Xorg + glamor
 

@@ -11,3 +11,5 @@ noaccel -comppixwin500: 1600 trep @   2.9517 msec (   339.0/sec): Composite 500x
 noaccel -oddtilerect100: 57600 trep @   0.0707 msec ( 14100.0/sec): 100x100 tiled rectangle (17x15 tile)
 noaccel -scroll500: 4000 trep @   1.1067 msec (   904.0/sec): Scroll 500x500 pixels
 noaccel stalls 0 timeouts 0
+noaccel -getimage10: 48000 trep @   0.1002 msec (  9980.0/sec): GetImage 10x10 square
+noaccel -getimage500: 720 trep @   5.9237 msec (   169.0/sec): GetImage 500x500 square

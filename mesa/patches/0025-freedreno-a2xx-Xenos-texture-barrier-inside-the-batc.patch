@@ -1,0 +1,441 @@
+From 03a1bde75908e62e580c166cf0fd52b2aade3305 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 11:53:31 -0700
+Subject: [PATCH 25/25] freedreno/a2xx: Xenos texture barrier inside the batch;
+ cheaper blits and readback
+
+- Texture barrier: a Xenos batch renders as one bin, so its draws run once,
+  in order. Resolve the color buffer area drawn since the last barrier in the
+  middle of the draw stream instead of flushing the batch. glamor calls
+  glTextureBarrierNV before every copy within a pixmap. XENOS_FLUSH_BARRIER
+  restores the flush.
+- Blits without a scissor get their destination box as the scissor, so the
+  batch restores and resolves only that box, and Xenos skips the post-blit
+  flush of the destination's writer (GLES2: no stencil texturing).
+- Blit every 32-bit texture transfer (texture_transfer_blit_min_pixels = 1,
+  XENOS_BLIT_MIN_PIXELS overrides), and only when the client's pixels are
+  4 bytes too: 16-bit formats sample wrongly from the staging texture.
+- Readback staging of 64K or more is mapped cached; dcbf the mapped level
+  before the CPU reads it.
+
+x11perf: copywinwin10 7550 -> 15200, putimage10 5700 -> 16300,
+putimage100 1070 -> 4870, getimage500 14 -> 62.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/fd2_context.c      |   3 +
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c |   5 +
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 113 +++++++++++++++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.h |   1 +
+ .../drivers/freedreno/freedreno_batch.h       |   2 +
+ .../drivers/freedreno/freedreno_batch_cache.c |   1 +
+ .../drivers/freedreno/freedreno_blitter.c     |  19 ++-
+ .../drivers/freedreno/freedreno_draw.c        |   1 +
+ .../drivers/freedreno/freedreno_resource.c    |  38 +++++-
+ .../drivers/freedreno/freedreno_screen.c      |   8 +-
+ src/mesa/state_tracker/st_cb_readpixels.c     |   3 +-
+ src/mesa/state_tracker/st_cb_texture.c        |   3 +-
+ 12 files changed, 184 insertions(+), 13 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_context.c b/src/gallium/drivers/freedreno/a2xx/fd2_context.c
+index c269468..afe6eb8 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_context.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_context.c
+@@ -100,6 +100,9 @@ fd2_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+    if (!pctx)
+       return NULL;
+ 
++   if (is_xenos(fd_screen(pscreen)))
++      pctx->texture_barrier = fd2_xenos_texture_barrier;
++
+    /* construct vertex state used for solid ops (clear, and gmem<->mem) */
+    fd2_ctx->solid_vertexbuf = create_solid_vertexbuf(pctx);
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 421c3df..a7d3e2e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -362,6 +362,11 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+          MAX2(ctx->batch->max_scissor.maxx, scissor->maxx);
+       ctx->batch->max_scissor.maxy =
+          MAX2(ctx->batch->max_scissor.maxy, scissor->maxy);
++      struct pipe_scissor_state *bs = &ctx->batch->barrier_scissor;
++      bs->minx = MIN2(bs->minx, scissor->minx);
++      bs->miny = MIN2(bs->miny, scissor->miny);
++      bs->maxx = MAX2(bs->maxx, scissor->maxx);
++      bs->maxy = MAX2(bs->maxy, scissor->maxy);
+    }
+ 
+    if (dirty & FD_DIRTY_VIEWPORT) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 843f241..9b1624e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -75,10 +75,10 @@ use_hw_binning(struct fd_batch *batch)
+  * Restores and resolves only cover it: a resolve copies its rectangle to the same
+  * (x, y) in the destination (Xenia draw_util GetResolveInfo). */
+ static void
+-xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x1, unsigned *y1)
++xenos_scissor_rect(struct fd_batch *batch, const struct pipe_scissor_state *ms,
++                   unsigned *x0, unsigned *y0, unsigned *x1, unsigned *y1)
+ {
+    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
+-   const struct pipe_scissor_state *ms = &batch->max_scissor;
+    *x0 = 0; *y0 = 0; *x1 = pfb->width; *y1 = pfb->height;
+    if (!getenv("XENOS_FULL_RESOLVE") && ms->minx <= ms->maxx && ms->miny <= ms->maxy) {
+       *x0 = MIN2(ms->minx, pfb->width) & ~7u;
+@@ -90,13 +90,18 @@ xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x
+    *y1 = MAX2(align(*y1, 8), *y0 + 8);
+ }
+ 
++static void
++xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x1, unsigned *y1)
++{
++   xenos_scissor_rect(batch, &batch->max_scissor, x0, y0, x1, y1);
++}
++
+ /* transfer from gmem to system memory (ie. normal RAM) */
+ 
+ static void
+-emit_gmem2mem_surf(struct fd_batch *batch, uint32_t base,
++emit_gmem2mem_surf(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t base,
+                    struct pipe_surface *psurf)
+ {
+-   struct fd_ringbuffer *ring = batch->tile_store;
+    struct fd_resource *rsc = fd_resource(psurf->texture);
+    uint32_t offset =
+       fd_resource_offset(rsc, psurf->level, psurf->first_layer);
+@@ -274,10 +279,10 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+    OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(EDRAM_COPY));
+ 
+    if (batch->resolve & (FD_BUFFER_DEPTH | FD_BUFFER_STENCIL))
+-      emit_gmem2mem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf);
++      emit_gmem2mem_surf(batch, ring, gmem->zsbuf_base[0], &pfb->zsbuf);
+ 
+    if (batch->resolve & FD_BUFFER_COLOR)
+-      emit_gmem2mem_surf(batch, gmem->cbuf_base[0], &pfb->cbufs[0]);
++      emit_gmem2mem_surf(batch, ring, gmem->cbuf_base[0], &pfb->cbufs[0]);
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
+@@ -889,6 +894,102 @@ fd2_emit_tile_renderprep(struct fd_batch *batch,
+    }
+ }
+ 
++/* Xenos texture barrier without ending the batch. A Xenos batch renders as one
++ * bin, so its draw commands run once, in order: resolving the color buffer's
++ * dirty area in the middle of them makes the earlier draws visible to later
++ * texture fetches (draws already invalidate the texture cache). glamor calls
++ * glTextureBarrierNV before every copy within a pixmap, which otherwise costs
++ * a whole batch (restore, resolve, submit) per copy.
++ */
++void
++fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
++{
++   struct fd_context *ctx = fd_context(pctx);
++   struct fd2_context *fd2_ctx = fd2_context(ctx);
++   struct fd_batch *batch = ctx->batch;
++   struct pipe_framebuffer_state *pfb;
++   struct fd_ringbuffer *ring;
++   unsigned rx0, ry0, rx1, ry1;
++
++   if (!batch || getenv("XENOS_FLUSH_BARRIER")) {
++      pctx->flush(pctx, NULL, 0);
++      return;
++   }
++   pfb = &batch->framebuffer;
++   /* nothing drawn since the last barrier (earlier batches are flushed by
++    * resource tracking when a draw reads what they wrote) */
++   if (batch->barrier_scissor.minx > batch->barrier_scissor.maxx ||
++       batch->barrier_scissor.miny > batch->barrier_scissor.maxy)
++      return;
++   if (pfb->nr_cbufs != 1 || !pfb->cbufs[0].texture || pfb->zsbuf.texture ||
++       batch->nondraw) {
++      pctx->flush(pctx, NULL, 0);
++      return;
++   }
++
++   fd_batch_needs_flush(batch);
++   ring = batch->draw;
++   /* only what was drawn since the last barrier */
++   xenos_scissor_rect(batch, &batch->barrier_scissor, &rx0, &ry0, &rx1, &ry1);
++   batch->barrier_scissor.minx = batch->barrier_scissor.miny = ~0;
++   batch->barrier_scissor.maxx = batch->barrier_scissor.maxy = 0;
++
++   fd2_emit_vertex_bufs(ring, 0x9c,
++                        (struct fd2_vertex_buf[]){
++                           {.prsc = fd2_ctx->solid_vertexbuf, .size = 36},
++                        },
++                        1);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_OFFSET));
++   OUT_RING(ring, 0x00000000);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
++   OUT_RING(ring, 0);
++   fd2_program_emit(ctx, ring, &ctx->solid_prog);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_AA_MASK));
++   OUT_RING(ring, 0x0000ffff);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTHCONTROL));
++   OUT_RING(ring, A2XX_RB_DEPTHCONTROL_EARLY_Z_ENABLE);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_SU_SC_MODE_CNTL));
++   OUT_RING(ring, A2XX_PA_SU_SC_MODE_CNTL_PROVOKING_VTX_LAST |
++                     A2XX_PA_SU_SC_MODE_CNTL_FRONT_PTYPE(PC_DRAW_TRIANGLES) |
++                     A2XX_PA_SU_SC_MODE_CNTL_BACK_PTYPE(PC_DRAW_TRIANGLES));
++   OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
++   OUT_RING(ring, xy2d(rx0, ry0));
++   OUT_RING(ring, xy2d(rx1, ry1));
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
++   OUT_RING(ring, 0x00000000);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 5);
++   OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
++   OUT_RING(ring, fui((rx1 - rx0) / 2.0f));
++   OUT_RING(ring, fui(rx0 + (rx1 - rx0) / 2.0f));
++   OUT_RING(ring, fui((ry1 - ry0) / 2.0f));
++   OUT_RING(ring, fui(ry0 + (ry1 - ry0) / 2.0f));
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
++   OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(EDRAM_COPY));
++
++   /* the only color buffer of a batch without depth is at EDRAM offset 0 */
++   emit_gmem2mem_surf(batch, ring, 0, &pfb->cbufs[0]);
++
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
++   OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(COLOR_DEPTH));
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_CONTROL));
++   OUT_RING(ring, 0x00000000);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_INFO));
++   OUT_RING(ring, xenos_rb_color_info(0));
++
++   fd_context_all_dirty(ctx);
++}
++
+ void
+ fd2_gmem_init(struct pipe_context *pctx) disable_thread_safety_analysis
+ {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.h b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.h
+index c0de22e..e625b06 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.h
+@@ -12,5 +12,6 @@
+ #include "pipe/p_context.h"
+ 
+ void fd2_gmem_init(struct pipe_context *pctx);
++void fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags);
+ 
+ #endif /* FD2_GMEM_H_ */
+diff --git a/src/gallium/drivers/freedreno/freedreno_batch.h b/src/gallium/drivers/freedreno/freedreno_batch.h
+index d2caec5..d844476 100644
+--- a/src/gallium/drivers/freedreno/freedreno_batch.h
++++ b/src/gallium/drivers/freedreno/freedreno_batch.h
+@@ -188,6 +188,8 @@ struct fd_batch {
+     * fully covered 512x512 the scissor would be 0,0+511,511)
+     */
+    struct pipe_scissor_state max_scissor;
++   /* Xenos: bounds drawn since the last in-batch texture barrier resolve */
++   struct pipe_scissor_state barrier_scissor;
+ 
+    /* Keep track of DRAW initiators that need to be patched up depending
+     * on whether we using binning or not:
+diff --git a/src/gallium/drivers/freedreno/freedreno_batch_cache.c b/src/gallium/drivers/freedreno/freedreno_batch_cache.c
+index dc308d2..d830d0c 100644
+--- a/src/gallium/drivers/freedreno/freedreno_batch_cache.c
++++ b/src/gallium/drivers/freedreno/freedreno_batch_cache.c
+@@ -537,6 +537,7 @@ batch_from_key(struct fd_context *ctx, struct fd_batch_key *key) assert_dt
+    batch->max_scissor.miny = ~0;
+    batch->max_scissor.maxx = 0;
+    batch->max_scissor.maxy = 0;
++   batch->barrier_scissor = batch->max_scissor;
+ 
+    _mesa_hash_table_insert_pre_hashed(cache->ht, hash, key, batch);
+    batch->key = key;
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index cf66d33..b0c1827 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -253,11 +253,25 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
+       fs = ctx->f16_blit_fs[target];
+    }
+ 
++   /* Xenos restores and resolves only the batch's scissor bounds: give an
++    * unscissored blit its destination box, or the batch covers the whole
++    * framebuffer (a 10x10 upload into the X front buffer moved 3.6 MB twice) */
++   struct pipe_scissor_state dst_scissor;
++   const struct pipe_scissor_state *scissor = info->scissor_enable ? &info->scissor : NULL;
++   if (!scissor && is_xenos(ctx->screen)) {
++      const struct pipe_box *b = &info->dst.box;
++      dst_scissor.minx = MIN2(b->x, b->x + b->width);
++      dst_scissor.miny = MIN2(b->y, b->y + b->height);
++      dst_scissor.maxx = MAX2(b->x, b->x + b->width);
++      dst_scissor.maxy = MAX2(b->y, b->y + b->height);
++      scissor = &dst_scissor;
++   }
++
+    /* Copy. */
+    util_blitter_blit_generic(
+       ctx->blitter, &dst_templ, &info->dst.box, src_view, &info->src.box,
+       src->width0, src->height0, info->mask, info->filter,
+-      info->scissor_enable ? &info->scissor : NULL, info->alpha_blend, false, 0,
++      scissor, info->alpha_blend, false, 0,
+       fs);
+ 
+    pipe_sampler_view_reference(&src_view, NULL);
+@@ -268,7 +282,8 @@ fd_blitter_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
+     * dEQP-GLES31.functional.stencil_texturing.format.stencil_index8_cube and
+     * 2d_array to pass.
+     */
+-   fd_bc_flush_writer(ctx, fd_resource(info->dst.resource));
++   if (!is_xenos(ctx->screen))   /* GLES2 only: no stencil texturing */
++      fd_bc_flush_writer(ctx, fd_resource(info->dst.resource));
+ 
+    /* The fallback blitter must never fail: */
+    return true;
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.c b/src/gallium/drivers/freedreno/freedreno_draw.c
+index f58b872..ae0b382 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.c
++++ b/src/gallium/drivers/freedreno/freedreno_draw.c
+@@ -466,6 +466,7 @@ batch_clear_tracking(struct fd_batch *batch, unsigned buffers) assert_dt
+    batch->max_scissor.miny = 0;
+    batch->max_scissor.maxx = pfb->width - 1;
+    batch->max_scissor.maxy = pfb->height - 1;
++   batch->barrier_scissor = batch->max_scissor;
+ 
+    /* for bookkeeping about which buffers have been cleared (and thus
+     * can fully or partially skip mem2gmem) we need to ignore buffers
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index f5c17dc..0e978e5 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -192,7 +192,11 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
+       ((prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE) |
+       COND(rsc->layout.tile_mode && !is_xenos(screen), FD_BO_NOMAP) |   /* Xenos (de)tiles on the CPU */
+       COND((prsc->usage == PIPE_USAGE_STAGING) &&
+-           (prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT),
++           ((prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT) ||
++            /* Xenos readback staging (upload staging stays write-combined;
++             * small buffers come faster from the suballocated WC heap) */
++            (is_xenos(screen) && !(prsc->bind & PIPE_BIND_SAMPLER_VIEW) &&
++             size >= 65536)),
+            FD_BO_CACHED_COHERENT) |
+       COND(prsc->bind & PIPE_BIND_SHARED, FD_BO_SHARED) |
+       COND(prsc->bind & PIPE_BIND_SCANOUT, FD_BO_SCANOUT);
+@@ -764,6 +768,32 @@ valid_range(struct fd_resource *rsc, const struct pipe_box *box)
+ }
+ 
+ 
++/* Xenos readback staging buffers are mapped cached (reads through an uncached
++ * mapping ran at ~17 MB/s). xegpu writes them back before each submit; before the CPU
++ * reads what the GPU wrote, drop the stale lines here (dcbf from user space;
++ * the lines are clean, so nothing is written back over the GPU's data). */
++static void
++xenos_inval_cached(struct fd_resource *rsc, unsigned level)
++{
++#if defined(__powerpc__)
++   if (!fd_bo_is_cached(rsc->bo))
++      return;
++   /* just the level: dcbf costs a bus transaction per line, and a staging
++    * buffer's BO is at least a 64K page */
++   uintptr_t p = (uintptr_t)fd_bo_map(rsc->bo) + fd_resource_offset(rsc, level, 0);
++   uintptr_t end = MIN2(p + (uintptr_t)fd_resource_layer_stride(rsc, level) *
++                               MAX2(rsc->b.b.array_size, u_minify(rsc->b.b.depth0, level)),
++                        (uintptr_t)fd_bo_map(rsc->bo) + fd_bo_size(rsc->bo));
++   if (rsc->b.b.target == PIPE_BUFFER || end <= p) {
++      p = (uintptr_t)fd_bo_map(rsc->bo);
++      end = p + fd_bo_size(rsc->bo);
++   }
++   for (p &= ~(uintptr_t)127; p < end; p += 128)
++      __asm__ volatile("dcbf 0,%0" : : "r"(p) : "memory");
++   __asm__ volatile("sync" : : : "memory");
++#endif
++}
++
+ /* Xbox 360 Xenos: resolves always write the GPU's 2D tiled layout and textures
+  * are fetched tiled, so CPU access to a tiled resource (de)tiles here instead of
+  * going through a GPU staging blit (which would resolve tiled data into the
+@@ -826,6 +856,8 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+       return NULL;
+    trans->b.b.stride = stride;
+    trans->b.b.layer_stride = stride * box->height;
++   if (usage & PIPE_MAP_READ)
++      xenos_inval_cached(rsc, level);
+    if (usage & PIPE_MAP_READ)
+       xenos_tile_copy(rsc, level, box, trans->xenos_linear, stride, true);
+    if (usage & PIPE_MAP_WRITE)
+@@ -863,6 +895,8 @@ resource_transfer_map_staging(struct pipe_context *pctx,
+       fd_blit_to_staging(ctx, trans);
+ 
+       fd_resource_wait(ctx, staging_rsc, FD_BO_PREP_READ);
++      if (is_xenos(ctx->screen))
++         xenos_inval_cached(staging_rsc, 0);
+    }
+ 
+    ctx->stats.staging_uploads++;
+@@ -890,6 +924,8 @@ resource_transfer_map_unsync(struct pipe_context *pctx,
+    }
+ 
+    buf = fd_bo_map(rsc->bo);
++   if (buf && (usage & PIPE_MAP_READ) && is_xenos(fd_screen(prsc->screen)))
++      xenos_inval_cached(rsc, level);
+ 
+    /* With imported bo's allocated by something outside of mesa, when
+     * running in a VM (using virtio_gpu kernel driver) we could end up in
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 688da2f..e56634e 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -436,8 +436,12 @@ fd_init_screen_caps(struct fd_screen *screen)
+    /* Xenos: GL buffers are uncached and tiled, so let the GPU convert and tile
+     * uploads/readbacks instead of the CPU (x11perf putimage) */
+    caps->texture_transfer_modes = (screen->gen >= 6 || is_xenos(screen)) ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
+-   /* a blit costs ~0.5 ms of setup on Xenos: small uploads are faster on the CPU */
+-   caps->texture_transfer_blit_min_pixels = is_xenos(screen) ? 128 * 128 : 0;
++   /* Xenos: blit every 32-bit transfer. Blits used to cost ~0.5 ms because each
++    * flushed its batch and resolved the whole framebuffer; now a 10x10 upload is
++    * 3x faster by blit than by flushing, waiting and tiling on the CPU.
++    * XENOS_BLIT_MIN_PIXELS sends smaller transfers to the CPU path. */
++   caps->texture_transfer_blit_min_pixels =
++      is_xenos(screen) ? debug_get_num_option("XENOS_BLIT_MIN_PIXELS", 1) : 0;
+ 
+    caps->pci_group =
+    caps->pci_bus =
+diff --git a/src/mesa/state_tracker/st_cb_readpixels.c b/src/mesa/state_tracker/st_cb_readpixels.c
+index a622cfb..0798bb6 100644
+--- a/src/mesa/state_tracker/st_cb_readpixels.c
++++ b/src/mesa/state_tracker/st_cb_readpixels.c
+@@ -462,7 +462,8 @@ st_ReadPixels(struct gl_context *ctx, GLint x, GLint y,
+ 
+    if (st->screen->caps.texture_transfer_blit_min_pixels &&
+        ((uint64_t)width * height < st->screen->caps.texture_transfer_blit_min_pixels ||
+-        util_format_get_blocksize(src->format) != 4))
++        util_format_get_blocksize(src->format) != 4 ||
++        _mesa_bytes_per_pixel(format, type) != 4))
+       goto fallback;
+ 
+    /* XXX Fallback for depth-stencil formats due to an incomplete
+diff --git a/src/mesa/state_tracker/st_cb_texture.c b/src/mesa/state_tracker/st_cb_texture.c
+index d989c57..903f569 100644
+--- a/src/mesa/state_tracker/st_cb_texture.c
++++ b/src/mesa/state_tracker/st_cb_texture.c
+@@ -2225,7 +2225,8 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
+ 
+    if (screen->caps.texture_transfer_blit_min_pixels &&
+        ((uint64_t)width * height * depth < screen->caps.texture_transfer_blit_min_pixels ||
+-        util_format_get_blocksize(dst->format) != 4))
++        util_format_get_blocksize(dst->format) != 4 ||
++        _mesa_bytes_per_pixel(format, type) != 4))
+       goto fallback;
+ 
+    /* If the base internal format and the texture format don't match,
+-- 
+2.53.0
+

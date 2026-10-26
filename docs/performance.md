@@ -4,26 +4,30 @@ First pass, 26 October 2026. Everything here was measured on the console with x1
 
 ## Results
 
-x11perf operations per second, 1280x720, depth 24:
+x11perf operations per second, 1280x720, depth 24. "Morning" is after the first two rounds below, "now" after the third:
 
-| test | glamor before | glamor after | no acceleration |
-|---|---:|---:|---:|
-| `-rect10` | 319,000 | 342,000 | 1,670,000 |
-| `-rect500` | 9,550 | 10,100 | 3,090 |
-| `-copywinwin10` | 1,570 | 6,420 | 136,000 |
-| `-copywinwin500` | 808 | 2,130 | 487 |
-| `-putimage10` | 5,580 | 5,710 | 154,000 |
-| `-putimage500` | 29.9 | 167 | 154 |
-| `-shmput500` | 32.3 | 353 | 321 |
-| `-aa10text` | 166,000 | 187,000 | 290,000 |
-| `-aa24text` | 125,000 | 148,000 | 89,100 |
-| `-comppixwin500` | 9,790 | 10,000 | 339 |
-| `-oddtilerect100` | 103,000 | 119,000 | 14,100 |
-| `-scroll500` | 808 | 2,130 | 904 |
+| test | glamor before | glamor morning | glamor now | no acceleration |
+|---|---:|---:|---:|---:|
+| `-rect10` | 319,000 | 342,000 | 334,000 | 1,670,000 |
+| `-rect500` | 9,550 | 10,100 | 10,100 | 3,090 |
+| `-copywinwin10` | 1,570 | 6,420 | 14,900 | 136,000 |
+| `-copywinwin500` | 808 | 2,130 | 2,170 | 487 |
+| `-putimage10` | 5,580 | 5,710 | 15,800 | 154,000 |
+| `-putimage500` | 29.9 | 167 | 168 | 154 |
+| `-shmput500` | 32.3 | 353 | 391 | 321 |
+| `-getimage10` | | 3,230 | 4,000 | 9,980 |
+| `-getimage500` | | 14.0 | 62.9 | 169 |
+| `-aa10text` | 166,000 | 187,000 | 185,000 | 290,000 |
+| `-aa24text` | 125,000 | 148,000 | 150,000 | 89,100 |
+| `-comppixwin500` | 9,790 | 10,000 | 10,000 | 339 |
+| `-oddtilerect100` | 103,000 | 119,000 | 117,000 | 14,100 |
+| `-scroll500` | 808 | 2,130 | 2,160 | 904 |
 
-Raw output is in `conformance/results/perf/`. The GPU wins big on large fills, composites and tiled fills (30x on `comppixwin500`, 8x on `oddtilerect100`) and now beats the CPU on large copies, scrolls and uploads. It still loses badly on tiny operations, where each one costs a whole GL batch.
+Raw output is in `conformance/results/perf/`. The GPU wins big on large fills, composites and tiled fills (30x on `comppixwin500`, 8x on `oddtilerect100`) and beats the CPU on large copies, scrolls and uploads. It still loses on tiny operations and on reading pixels back.
 
-`glrt` (64x64 FBO, one 3-vertex draw, `glFinish`, repeated): 172 µs per batch before, 102 µs after.
+`glrt` (64x64 FBO, one 3-vertex draw, `glFinish`, repeated): 172 µs per batch before, 102 µs after round 2.
+
+A side effect of round 3: the dEQP 1-in-20 sample (859 cases) now runs in about 70 seconds instead of 10 minutes, because every case reads its frame back with `glReadPixels`.
 
 ## How we found the costs
 
@@ -44,13 +48,24 @@ Xorg turned out to be CPU-bound in every slow test: its CPU time equalled wall t
 
 Things that didn't matter: the full-memory cache invalidates before draws (`XENOS_SKIP_FULL_INVAL` changed copywinwin10 by 5%), write-combined mapping of GL buffers (+6% on putimage500).
 
+## Round 3: fewer batches
+
+Rounds 1 and 2 made each batch cheaper. Round 3 avoids batches.
+
+1. **Texture barriers inside the batch.** glamor calls `glTextureBarrierNV` before every copy within one pixmap (window to window on the same screen, for instance), and freedreno implements the barrier as a full flush: restore, draw, resolve, submit, per copy. A Xenos batch renders as a single bin, so its draw stream runs exactly once and in order. The barrier now emits a resolve of the area drawn since the last barrier into the middle of the draw stream and keeps the batch open. Draws already invalidate the texture cache, so later draws sample what earlier ones wrote. copywinwin10 7,550 to 15,200. `XENOS_FLUSH_BARRIER=1` brings back the flush for comparison.
+2. **Blits scissored to their destination.** Texture uploads by blit took 0.6 ms each regardless of size. The blit ran unscissored, so its batch restored and resolved the whole 1280x720 front buffer (3.6 MB each way) for a 10x10 upload, and freedreno flushed the batch after every blit (a workaround for a GLES 3.1 stencil texturing test). Xenos blits now get their destination box as the scissor and skip that flush. With that, a blit beats the CPU path even for 10x10, so every 32-bit transfer goes by blit: putimage10 5,710 to 15,800, putimage100 1,070 to 4,870.
+3. **Cached readback.** Reading the staging buffer through the uncached mapping ran at about 17 MB/s. Readback staging buffers of 64 KB or more are now mapped cached. xegpu cleans every cached buffer the checker didn't already walk before a submit, and Mesa runs `dcbf` over the mapped level before the CPU reads it (the lines are clean, so nothing gets written back over the GPU's data). getimage500 14 to 63.
+4. **Checker.** It cleans (`dcbst`) cached command buffers instead of flushing them (`dcbf` threw the lines away just before reading them), and range-checks runs of register writes once instead of per register. 17.5 to 10.7 µs per small submit.
+
+`xorg/xcopytest.c` checks the first two against a CPU model: random fills, overlapping and non-overlapping copies and PutImages, in a window and in a pixmap, read back with `XGetImage`. With the barrier turned into a no-op it reports thousands of wrong pixels; with the in-batch barrier it reports none. The dEQP sample showed no regressions after a fix: blitting 16-bit client data through a staging texture broke rgba4444 and rgb565 cases (the 16-bit formats sample wrongly on Xenos), so blits now also require 4-byte client pixels.
+
 ## Where the time goes now
 
-Per small batch (~100 µs): about 50 µs in the kernel submit (34 µs of it the command checker) and about 50 µs of Mesa re-emitting state (`fd2_emit_restore`, `fd2_program_emit`, `fd2_emit_state`, tile setup). `putimage10` waits for the previous batch's fence before writing into a busy texture.
+For `glrt`'s small batch: about 34 µs in the kernel submit (11 of them the checker), the rest in Mesa building the batch and in the GPU round trip. A copy inside a batch costs about 65 µs; that hasn't been profiled in detail yet, but every in-batch resolve forces Mesa to re-emit all state for the next draw. Large copies and scrolls are bound by GPU memory traffic: a 500x500 scroll goes through a temporary pixmap, restoring and resolving about 4 MB.
 
 Next:
 
-- Don't re-emit unchanged state at every batch; Xenos uploads whole 16-constant blocks and reloads shaders per batch.
-- Make the checker cheaper (it walks every constant dword and searches the buffer list for every address), or make it optional for trusted clients.
-- Avoid the stall in `putimage10`: write into a fresh buffer when the old one is busy.
+- Don't re-emit unchanged state; Xenos uploads whole 16-constant blocks and reloads shaders after every resolve.
+- Skip the restore when a draw covers its whole scissor with an opaque copy (the scroll case).
+- Small readbacks: `getimage10` still loses to the CPU (4,000 vs 9,980).
 - Merge glamor's small operations into fewer batches.

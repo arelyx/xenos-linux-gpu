@@ -17,7 +17,7 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 only |
 | Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 98.0% of executed cases pass, no GPU hangs (`conformance/results/full3-report.txt`). Cube maps are most of the remaining failures |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
-| Performance | First pass done ([docs/performance.md](docs/performance.md)): large copies, scrolls and uploads now beat CPU rendering; small operations still cost ~100 µs per GL batch |
+| Performance | Three rounds ([docs/performance.md](docs/performance.md)): large copies, scrolls, uploads, fills and composites beat CPU rendering; a 10x10 copy went from 640 to 67 µs and a 10x10 upload from 175 to 63 µs, still slower than the CPU |
 | Not done | Cube maps, ETC1, state re-emission per batch, Vulkan (never) |
 
 Nothing here writes to the console's NAND. The only change to the softmod is one byte in a file on the hard disk (see [docs/setup.md](docs/setup.md)).
@@ -50,7 +50,7 @@ kernel/xenon_idle/   low-priority idle loop for the Xenon SMT threads (1.85x sin
 kernel/patches/      Free60 kernel fixes: sis190 TX wake race, AltiVec for Xenon
 userspace/           libxenon's xe.c/edram.c ported to Linux user space, xeinit (EDRAM training), tests, replay tool
 mesa/patches/        git format-patch series on Mesa (base ab1502f), cross file
-xorg/                glamor big-endian GLES patch (xorg-server 21.1.25)
+xorg/                glamor big-endian GLES patch (xorg-server 21.1.25), xcopytest (copy/PutImage checker)
 gltest/              small GL probes, each aimed at one hypothesis
 conformance/         dEQP-GLES2 harness with hang attribution and IR power cycling; dEQP big-endian patch
 tools/               rd dump replay/bisect (rdstep), Xenia-table linters (xenoslint, xenosfields), decoders

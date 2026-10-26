@@ -23,6 +23,9 @@ static unsigned long submit_count, submit_ns, submit_check_ns, submit_fenceout_c
 module_param(submit_count, ulong, 0444);
 module_param(submit_ns, ulong, 0444);
 module_param(submit_check_ns, ulong, 0444);
+static unsigned long submit_check_dw, submit_flush_ns;
+module_param(submit_check_dw, ulong, 0444);
+module_param(submit_flush_ns, ulong, 0444);
 module_param(submit_fenceout_count, ulong, 0444);
 static bool msm_map_wc = true;
 static bool msm_cached_rings = true;
@@ -131,7 +134,7 @@ MODULE_PARM_DESC(msm_validate, "Parse submitted command streams and refuse unsaf
 static int msm_rejects;
 module_param(msm_rejects, int, 0444);
 
-struct xe_range { u32 start, end; void *vaddr; };
+struct xe_range { u32 start, end; void *vaddr; bool cached, checked; };
 
 static bool mmio_ok(u32 reg)
 {
@@ -200,6 +203,7 @@ static void xe_track(struct xe_cstate *st, u32 reg, u32 v)
 }
 
 static bool in_ranges(const struct xe_range *r, int n, u32 addr, u32 len, void **vaddr);
+static const struct xe_range *xe_range_of(const struct xe_range *r, int n, u32 addr, u32 len);
 
 /* The checker reads command words through the kernel's cached linear mapping
  * instead of the uncached one (one bus transaction per load made checking cost
@@ -207,14 +211,23 @@ static bool in_ranges(const struct xe_range *r, int n, u32 addr, u32 len, void *
  * CPU wrote these buffers through uncached/write-combined mappings. */
 static bool msm_check_cached = true;
 module_param(msm_check_cached, bool, 0644);
-static const u32 *xe_check_view(const void *uncached, u32 phys, u32 bytes)
+static const u32 *xe_check_view(const void *uncached, u32 phys, u32 bytes, bool cached)
 {
 	void *v;
 
 	if (!msm_check_cached)
 		return uncached;
+	u64 t = ktime_get_ns();
 	v = phys_to_virt(phys);
-	flush_dcache_range((unsigned long)v, (unsigned long)v + bytes);
+	/* a buffer user space maps cached only needs its lines written back (and they
+	 * stay valid for the reads below); one written through an uncached mapping
+	 * may have stale lines here, so drop them */
+	if (cached)
+		clean_dcache_range((unsigned long)v, (unsigned long)v + bytes);
+	else
+		flush_dcache_range((unsigned long)v, (unsigned long)v + bytes);
+	submit_flush_ns += ktime_get_ns() - t;
+	submit_check_dw += bytes / 4;
 	return v;
 }
 
@@ -227,6 +240,15 @@ static bool xe_resolve_ok(const struct xe_range *r, int n, const struct xe_cstat
 	/* tiled destinations are padded to 32x32 */
 	u32 h = (height + 31) & ~31u, p = (pitch + 31) & ~31u;
 	return in_ranges(r, n, st->copy_base & ~0xfffu, p * h * bpp, NULL);
+}
+
+static const struct xe_range *xe_range_of(const struct xe_range *r, int n, u32 addr, u32 len)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (addr >= r[i].start && (u64)addr + len <= r[i].end)
+			return &r[i];
+	return NULL;
 }
 
 static bool in_ranges(const struct xe_range *r, int n, u32 addr, u32 len, void **vaddr)
@@ -257,6 +279,16 @@ static int xe_check_stream(const struct xe_range *r, int n, const u32 *w, u32 nd
 		if (type == 0) {
 			u32 cnt = ((h >> 16) & 0x3fff) + 1, reg = h & 0x7fff, j;
 			bool one = h & (1 << 15);
+			if (k + 1 + cnt > ndw)
+				return -EINVAL;
+			/* the common case, a run of context registers or constants: one range test */
+			if (!one && reg >= 0x2000 && reg + cnt <= 0x4a00) {
+				if (reg <= 0x231b && reg + cnt > 0x2208)
+					for (j = 0; j < cnt; j++)
+						xe_track(st, reg + j, w[k + 1 + j]);
+				k += 1 + cnt;
+				continue;
+			}
 			for (j = 0; j < cnt; j++)
 				xe_track(st, one ? reg : reg + j, w[k + 1 + j]);
 			for (j = 0; j < (one ? 1 : cnt); j++)
@@ -302,8 +334,9 @@ static int xe_check_stream(const struct xe_range *r, int n, const u32 *w, u32 nd
 			}
 			if (op == 0x2d && cnt >= 2 && (w[k + 1] >> 16) == 4) {	/* SET_CONSTANT: registers */
 				u32 base = 0x2000 + (w[k + 1] & 0x7ff), j;
-				for (j = 0; j + 1 < cnt; j++)
-					xe_track(st, base + j, w[k + 2 + j]);
+				if (base <= 0x231b && base + cnt - 1 > 0x2208)
+					for (j = 0; j + 1 < cnt; j++)
+						xe_track(st, base + j, w[k + 2 + j]);
 			}
 			if ((op == 0x22 || op == 0x36) && (st->modecontrol & 7) == 6) {	/* draw in copy mode */
 				if (!xe_resolve_ok(r, n, st)) {
@@ -313,14 +346,17 @@ static int xe_check_stream(const struct xe_range *r, int n, const u32 *w, u32 nd
 				}
 			}
 			if (op == 0x3f || op == 0x37) {	/* IB: addr, size */
-				void *v;
 				u32 addr = w[k + 1], size = w[k + 2] & 0xfffff;
+				const struct xe_range *ib = xe_range_of(r, n, addr, size * 4);
 				int rc;
-				if (!in_ranges(r, n, addr, size * 4, &v) || !v) {
+				if (!ib || !ib->vaddr) {
 					pr_warn_ratelimited("xegpu: submit rejected: IB at %08x outside the submit\n", addr);
 					return -EPERM;
 				}
-				rc = xe_check_stream(r, n, xe_check_view(v, addr & ~3u, size * 4), size, depth + 1, st);
+				((struct xe_range *)ib)->checked = true;
+				rc = xe_check_stream(r, n, xe_check_view((u8 *)ib->vaddr + (addr - ib->start), addr & ~3u,
+									 size * 4, ib->cached),
+						     size, depth + 1, st);
 				if (rc)
 					return rc;
 			}
@@ -595,18 +631,11 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 			goto out;
 		}
 		bos[i].presumed = objs[i]->dma_addr;
-		/* write back CPU caches so the GPU sees what user space wrote; only buffers
-		 * mapped cached need it (this flushed the whole 4 MB front buffer on every submit) */
-		/* with the cached checker, the lines the GPU will read (command streams and
-		 * the IBs they call) are written back while they are checked; otherwise the
-		 * whole buffer (Mesa's ring heap is several MB) */
-		if (objs[i]->map_noncoherent && !(msm_validate && msm_check_cached))
-			dma_sync_single_for_device(dev->dev, objs[i]->dma_addr, objs[i]->base.size, DMA_BIDIRECTIONAL);
 	}
 	if (msm_validate) {
 		t_check = ktime_get_ns();
 	}
-	if (msm_validate) {
+	{
 		struct xe_range *rg = kvmalloc_array(a->nr_bos, sizeof(*rg), GFP_KERNEL);
 		if (!rg) {
 			ret = -ENOMEM;
@@ -616,8 +645,10 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 			rg[i].start = lower_32_bits(objs[i]->dma_addr);
 			rg[i].end = rg[i].start + objs[i]->base.size;
 			rg[i].vaddr = objs[i]->vaddr;
+			rg[i].cached = objs[i]->map_noncoherent;
+			rg[i].checked = false;
 		}
-		for (i = 0; i < a->nr_cmds && !ret; i++) {
+		for (i = 0; i < a->nr_cmds && !ret && msm_validate; i++) {
 			struct drm_msm_gem_submit_cmd *c = &cmds[i];
 			struct drm_gem_dma_object *o;
 			if (c->submit_idx >= a->nr_bos || (c->size & 3) ||
@@ -626,16 +657,27 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 				break;
 			}
 			o = objs[c->submit_idx];
+			rg[c->submit_idx].checked = true;
 			{
 				struct xe_cstate st = { 0 };
 				ret = xe_check_stream(rg, a->nr_bos,
 						      xe_check_view((u8 *)o->vaddr + c->submit_offset,
-								    lower_32_bits(o->dma_addr) + c->submit_offset, c->size),
+								    lower_32_bits(o->dma_addr) + c->submit_offset, c->size,
+								    o->map_noncoherent),
 						      c->size / 4, 0, &st);
 			}
 		}
+		/* write back CPU caches so the GPU sees what user space wrote; only buffers
+		 * mapped cached need it (this flushed the whole 4 MB front buffer on every
+		 * submit). The cached checker already wrote back the command words it read;
+		 * other cached buffers (Mesa's staging buffers) are cleaned whole. */
+		for (i = 0; i < a->nr_bos && !ret; i++)
+			if (objs[i]->map_noncoherent && !(rg[i].checked && msm_check_cached))
+				dma_sync_single_for_device(dev->dev, objs[i]->dma_addr, objs[i]->base.size,
+							   DMA_TO_DEVICE);
 		kvfree(rg);
-		submit_check_ns += ktime_get_ns() - t_check;
+		if (msm_validate)
+			submit_check_ns += ktime_get_ns() - t_check;
 		if (ret) {
 			msm_rejects++;
 			goto out;
