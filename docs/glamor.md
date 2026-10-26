@@ -31,5 +31,5 @@ LD_LIBRARY_PATH=/opt/mesa-xenos/lib PIXMAN_DISABLE=vmx \
 ## Open
 
 - Performance: see [performance.md](performance.md). Restores and resolves now cover only each batch's scissor bounds.
-- Xfce under glamor hasn't been tried for long sessions yet.
+- A full Xfce session runs on glamor (`config/systemd/xfce-glamor.service`; `docs/images/xfce-glamor-scanout-2026-10-26.png` is its scanout), but hasn't been used for long sessions yet.
 - glamor still falls back to software for depth 8, 15 and 16.
