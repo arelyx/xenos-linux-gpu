@@ -237,7 +237,7 @@ version                                               1      1
 vertex_arrays.multiple_attributes                   203    203  
 vertex_arrays.single_attribute                      368    368  
 
-fixed since /home/arelyx/peer_pressure/netboot/conformance/runs/full3: 49; regressed: 5
+fixed since runs/full3: 49; regressed: 5
   REGRESSED dEQP-GLES2.functional.fbo.render.color.blend_npot_rbo_bgra_depth_component16 Pass -> Fail
   REGRESSED dEQP-GLES2.functional.fbo.render.resize.rbo_bgra_stencil_index8 Pass -> Fail
   REGRESSED dEQP-GLES2.functional.fbo.render.resize.rbo_rgb565_depth_component16 Pass -> Fail
