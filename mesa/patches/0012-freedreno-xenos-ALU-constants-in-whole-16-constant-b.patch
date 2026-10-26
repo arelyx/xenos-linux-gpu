@@ -1,7 +1,7 @@
 From 150037e93ae8b6a6bb3cb7e9bf9bc81864ba3899 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 21:51:27 -0700
-Subject: [PATCH 12/22] freedreno/xenos: ALU constants in whole 16-constant
+Subject: [PATCH 12/24] freedreno/xenos: ALU constants in whole 16-constant
  blocks from a context shadow, fetch constants in whole 6-dword groups,
  Xe_pAlign-style alignment, vertex fetch bit 28, no fast clear
 

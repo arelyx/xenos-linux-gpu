@@ -1,7 +1,7 @@
 From 5a0458b758276d6d8cf5bc85ff7458b90ea0dae7 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 22:28:22 -0700
-Subject: [PATCH 14/22] freedreno/xenos: fold vertex buffer offsets into fetch
+Subject: [PATCH 14/24] freedreno/xenos: fold vertex buffer offsets into fetch
  instructions, per-BO invalidates, post-resolve cache flush, invalidate before
  shader loads, no mini fetch/prefetch
 

@@ -1,7 +1,7 @@
 From 07a7a68a42c07c036fee4b4d2ab4717f9e454b99 Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 13:52:29 -0700
-Subject: [PATCH 02/22] freedreno/a2xx: byte-swap modes for big-endian hosts
+Subject: [PATCH 02/24] freedreno/a2xx: byte-swap modes for big-endian hosts
 
 Index buffers 8in16/8in32, vertex buffers 8in32, textures by component size.
 

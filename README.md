@@ -17,7 +17,8 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 only |
 | Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 98.0% of executed cases pass, no GPU hangs (`conformance/results/full3-report.txt`). Cube maps are most of the remaining failures |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
-| Not done | Performance work (glamor redraws the whole framebuffer per batch), ETC1, cube-map mipmap filtering under dEQP, Vulkan (never) |
+| Performance | First pass done ([docs/performance.md](docs/performance.md)): large copies, scrolls and uploads now beat CPU rendering; small operations still cost ~100 µs per GL batch |
+| Not done | Cube maps, ETC1, state re-emission per batch, Vulkan (never) |
 
 Nothing here writes to the console's NAND. The only change to the softmod is one byte in a file on the hard disk (see [docs/setup.md](docs/setup.md)).
 
@@ -67,6 +68,7 @@ docs/                setup, hardware rules, methodology, footguns, conformance, 
 - [docs/footguns.md](docs/footguns.md): things that cost us hours
 - [docs/conformance.md](docs/conformance.md): dEQP pipeline and results
 - [docs/glamor.md](docs/glamor.md): getting X accelerated
+- [docs/performance.md](docs/performance.md): x11perf numbers, profiling without perf events, what changed
 - [docs/timeline.md](docs/timeline.md): what happened when
 - [docs/isa-a2xx-vs-xenos.md](docs/isa-a2xx-vs-xenos.md), [docs/path-c-plan.md](docs/path-c-plan.md): early design notes
 

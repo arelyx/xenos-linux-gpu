@@ -1,7 +1,7 @@
 From 584fe61a1f54aad602c6ba7fe2f97d15da6c2ff5 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 22:32:29 -0700
-Subject: [PATCH 16/22] freedreno/xenos: also invalidate the solid vertex
+Subject: [PATCH 16/24] freedreno/xenos: also invalidate the solid vertex
  buffer before clears and restores
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

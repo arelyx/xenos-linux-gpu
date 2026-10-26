@@ -1,7 +1,7 @@
 From a9e22ac21006965d7fdab35f9741b6305ffba857 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 17:05:20 -0700
-Subject: [PATCH 08/22] freedreno/xenos: fence with WAIT_UNTIL + MEM_WRITE;
+Subject: [PATCH 08/24] freedreno/xenos: fence with WAIT_UNTIL + MEM_WRITE;
  EVENT_WRITE_SHD wedges the memory hub
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

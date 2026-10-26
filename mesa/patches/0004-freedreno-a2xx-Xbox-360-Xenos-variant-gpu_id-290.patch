@@ -1,7 +1,7 @@
 From 7f95eb07d3774b3ccd1ce8b2336179071a802a52 Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 15:17:56 -0700
-Subject: [PATCH 04/22] freedreno/a2xx: Xbox 360 Xenos variant (gpu_id 290)
+Subject: [PATCH 04/24] freedreno/a2xx: Xbox 360 Xenos variant (gpu_id 290)
 
 New device entry (chip 0x02090000, 10MB GMEM = EDRAM, bins aligned to 160x16 so the
 EDRAM pitch is an even number of 80x16 tiles) and a drm-shim entry. On Xenos:

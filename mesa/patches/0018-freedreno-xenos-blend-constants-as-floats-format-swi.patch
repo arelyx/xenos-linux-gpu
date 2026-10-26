@@ -1,7 +1,7 @@
 From bed0afec2ab0960645d3e04edbcb57f3f1ef529f Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 02:17:41 -0700
-Subject: [PATCH 18/22] freedreno/xenos: blend constants as floats, format
+Subject: [PATCH 18/24] freedreno/xenos: blend constants as floats, format
  swizzle on EDRAM restore, 32-bit-component vertex formats only, resolve
  endian 2 for byte-reversed formats
 

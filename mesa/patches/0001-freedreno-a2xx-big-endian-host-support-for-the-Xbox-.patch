@@ -1,7 +1,7 @@
 From 61c1b3e7b1cdb3574815633e6d0b2e2d364de8c2 Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 13:51:01 -0700
-Subject: [PATCH 01/22] freedreno/a2xx: big-endian host support for the Xbox
+Subject: [PATCH 01/24] freedreno/a2xx: big-endian host support for the Xbox
  360 (Xenos)
 
 Lay out the a2xx instruction bitfield structs in little-endian storage order on

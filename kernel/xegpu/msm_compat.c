@@ -15,8 +15,19 @@
 #include <linux/dma-fence.h>
 #include <linux/sync_file.h>
 #include <linux/file.h>
+#include <asm/cacheflush.h>
 
 static int xenos_gpu_state_init(void);
+/* submit profiling: totals since load (read with cat; divide by submit_count) */
+static unsigned long submit_count, submit_ns, submit_check_ns, submit_fenceout_count;
+module_param(submit_count, ulong, 0444);
+module_param(submit_ns, ulong, 0444);
+module_param(submit_check_ns, ulong, 0444);
+module_param(submit_fenceout_count, ulong, 0444);
+static bool msm_map_wc = true;
+static bool msm_cached_rings = true;
+module_param(msm_cached_rings, bool, 0644);
+module_param(msm_map_wc, bool, 0644);
 static bool msm_state_init = true;
 module_param(msm_state_init, bool, 0644);
 MODULE_PARM_DESC(msm_state_init, "run the Xe_Init state stream before msm submits after a CP init (GL needs it)");
@@ -190,6 +201,23 @@ static void xe_track(struct xe_cstate *st, u32 reg, u32 v)
 
 static bool in_ranges(const struct xe_range *r, int n, u32 addr, u32 len, void **vaddr);
 
+/* The checker reads command words through the kernel's cached linear mapping
+ * instead of the uncached one (one bus transaction per load made checking cost
+ * more than everything else in a small submit). Drop any stale lines first: the
+ * CPU wrote these buffers through uncached/write-combined mappings. */
+static bool msm_check_cached = true;
+module_param(msm_check_cached, bool, 0644);
+static const u32 *xe_check_view(const void *uncached, u32 phys, u32 bytes)
+{
+	void *v;
+
+	if (!msm_check_cached)
+		return uncached;
+	v = phys_to_virt(phys);
+	flush_dcache_range((unsigned long)v, (unsigned long)v + bytes);
+	return v;
+}
+
 /* a draw in EDRAM copy mode writes pitch x height pixels at copy_base */
 static bool xe_resolve_ok(const struct xe_range *r, int n, const struct xe_cstate *st)
 {
@@ -292,7 +320,7 @@ static int xe_check_stream(const struct xe_range *r, int n, const u32 *w, u32 nd
 					pr_warn_ratelimited("xegpu: submit rejected: IB at %08x outside the submit\n", addr);
 					return -EPERM;
 				}
-				rc = xe_check_stream(r, n, v, size, depth + 1, st);
+				rc = xe_check_stream(r, n, xe_check_view(v, addr & ~3u, size * 4), size, depth + 1, st);
 				if (rc)
 					return rc;
 			}
@@ -363,7 +391,13 @@ static int xe_pool_gem_mmap(struct drm_gem_object *gobj, struct vm_area_struct *
 
 	vma->vm_pgoff -= drm_vma_node_start(&gobj->vma_node);
 	vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
-	vma->vm_page_prot = pgprot_dmacoherent(vm_get_page_prot(vma->vm_flags));
+	/* write-combined (cache-inhibited, unguarded) so the CPU can gather stores
+	 * (x11perf putimage500 +6%); the submit ioctl orders them with mb() */
+	if (obj->map_noncoherent)
+		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);   /* cached, synced at submit */
+	else
+		vma->vm_page_prot = msm_map_wc ? pgprot_writecombine(vm_get_page_prot(vma->vm_flags))
+					       : pgprot_dmacoherent(vm_get_page_prot(vma->vm_flags));
 	return remap_pfn_range(vma, vma->vm_start, (obj->dma_addr >> PAGE_SHIFT) + vma->vm_pgoff,
 			       vma->vm_end - vma->vm_start, vma->vm_page_prot);
 }
@@ -415,6 +449,11 @@ static int msm_ioctl_gem_new(struct drm_device *dev, void *data, struct drm_file
 	if (!a->size || a->size > (64u << 20))
 		return -EINVAL;
 	obj = msm_pool ? xe_pool_gem_create(dev, a->size) : NULL;
+	/* MSM_BO_CACHED_COHERENT (Mesa's command streams): map cached, and the submit
+	 * writes the lines back (map_noncoherent). Mesa's per-dword stores to an
+	 * uncached ring were a large part of every small batch. */
+	if (obj && !IS_ERR(obj) && msm_cached_rings && (a->flags & MSM_BO_CACHED_COHERENT))
+		obj->map_noncoherent = true;
 	if (!obj) {
 		xe_creating_msm_bo = true;   /* serialised by the DRM ioctl path for this device file */
 		obj = drm_gem_dma_create(dev, PAGE_ALIGN(a->size));   /* contiguous; caching per msm_cached */
@@ -514,6 +553,7 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 	u64 fence = 0;
 	u32 i;
 	int ret = 0;
+	u64 t_start = ktime_get_ns(), t_check = 0;
 
 	if (MSM_PIPE_ID(a->flags) != MSM_PIPE_3D0)
 		return -EINVAL;
@@ -547,6 +587,7 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 		ret = -EFAULT;
 		goto out;
 	}
+	mb();   /* drain gathered stores to write-combined buffers before the GPU reads them */
 	for (i = 0; i < a->nr_bos; i++) {
 		objs[i] = msm_lookup(file, bos[i].handle);
 		if (!objs[i]) {
@@ -554,8 +595,16 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 			goto out;
 		}
 		bos[i].presumed = objs[i]->dma_addr;
-		/* write back CPU caches so the GPU sees what user space wrote */
-		dma_sync_single_for_device(dev->dev, objs[i]->dma_addr, objs[i]->base.size, DMA_BIDIRECTIONAL);
+		/* write back CPU caches so the GPU sees what user space wrote; only buffers
+		 * mapped cached need it (this flushed the whole 4 MB front buffer on every submit) */
+		/* with the cached checker, the lines the GPU will read (command streams and
+		 * the IBs they call) are written back while they are checked; otherwise the
+		 * whole buffer (Mesa's ring heap is several MB) */
+		if (objs[i]->map_noncoherent && !(msm_validate && msm_check_cached))
+			dma_sync_single_for_device(dev->dev, objs[i]->dma_addr, objs[i]->base.size, DMA_BIDIRECTIONAL);
+	}
+	if (msm_validate) {
+		t_check = ktime_get_ns();
 	}
 	if (msm_validate) {
 		struct xe_range *rg = kvmalloc_array(a->nr_bos, sizeof(*rg), GFP_KERNEL);
@@ -579,11 +628,14 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 			o = objs[c->submit_idx];
 			{
 				struct xe_cstate st = { 0 };
-				ret = xe_check_stream(rg, a->nr_bos, (u32 *)((u8 *)o->vaddr + c->submit_offset),
+				ret = xe_check_stream(rg, a->nr_bos,
+						      xe_check_view((u8 *)o->vaddr + c->submit_offset,
+								    lower_32_bits(o->dma_addr) + c->submit_offset, c->size),
 						      c->size / 4, 0, &st);
 			}
 		}
 		kvfree(rg);
+		submit_check_ns += ktime_get_ns() - t_check;
 		if (ret) {
 			msm_rejects++;
 			goto out;
@@ -618,8 +670,10 @@ static int msm_ioctl_gem_submit(struct drm_device *dev, void *data, struct drm_f
 			goto out;
 	}
 	a->fence = lower_32_bits(fence);
+	submit_count++;
 	if (a->flags & MSM_SUBMIT_FENCE_FD_OUT) {
 		struct dma_fence *df = xe_fence_create(fence);
+		submit_fenceout_count++;
 		struct sync_file *sf;
 		int fdn;
 
@@ -651,6 +705,7 @@ out:
 	kvfree(objs);
 	kvfree(cmds);
 	kvfree(bos);
+	submit_ns += ktime_get_ns() - t_start;
 	return ret;
 }
 

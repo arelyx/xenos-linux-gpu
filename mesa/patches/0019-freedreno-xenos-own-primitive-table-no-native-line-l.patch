@@ -1,7 +1,7 @@
 From d6fb1cffeeb3d5b18f8fb02d527db5a230458bf8 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 02:45:29 -0700
-Subject: [PATCH 19/22] freedreno/xenos: own primitive table, no native line
+Subject: [PATCH 19/24] freedreno/xenos: own primitive table, no native line
  loops (Xenos 7 is triangle-with-W-flags)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

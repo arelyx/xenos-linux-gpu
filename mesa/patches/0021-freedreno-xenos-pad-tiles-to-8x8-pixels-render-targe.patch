@@ -1,7 +1,7 @@
 From 7992d160410626847546b549166df945f5dbff07 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 08:23:23 -0700
-Subject: [PATCH 21/22] freedreno/xenos: pad tiles to 8x8 pixels; render
+Subject: [PATCH 21/24] freedreno/xenos: pad tiles to 8x8 pixels; render
  targets smaller than 8x8 wedged the GPU
 
 Also round the resolve rectangle to 8 pixels and the copy destination height to 32

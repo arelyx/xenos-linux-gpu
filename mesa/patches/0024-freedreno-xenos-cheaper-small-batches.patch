@@ -1,0 +1,95 @@
+From 6456c00ae5ef34d174e336a228e938d73e707f77 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 10:52:35 -0700
+Subject: [PATCH 24/24] freedreno/xenos: cheaper small batches
+
+- msm: skip the madvise ioctls on xegpu (it never purges buffers).
+- msm: treat xegpu as cached-coherent, so command streams are cached BOs that the
+  kernel writes back at submit (per-dword stores to uncached rings were a large part
+  of every small batch).
+- XENOS_SKIP_FULL_INVAL experiment hook.
+
+Per-batch round trip (gltest/glrt, 64x64 draw + glFinish): 172 -> 102 us together
+with the release build and kernel changes. dEQP sample unchanged.
+
+Generated-by: LLM
+---
+ src/freedreno/drm/msm/msm_bo.c                 |  2 +-
+ src/freedreno/drm/msm/msm_device.c             | 12 ++++++++++++
+ src/freedreno/drm/msm/msm_priv.h               |  1 +
+ src/gallium/drivers/freedreno/a2xx/fd2_xenos.h | 10 ++++++++++
+ 4 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/drm/msm/msm_bo.c b/src/freedreno/drm/msm/msm_bo.c
+index 3578834..aa8abf4 100644
+--- a/src/freedreno/drm/msm/msm_bo.c
++++ b/src/freedreno/drm/msm/msm_bo.c
+@@ -62,7 +62,7 @@ msm_bo_madvise(struct fd_bo *bo, int willneed)
+    int ret;
+ 
+    /* older kernels do not support this: */
+-   if (bo->dev->version < FD_VERSION_MADVISE)
++   if (bo->dev->version < FD_VERSION_MADVISE || to_msm_device(bo->dev)->no_madvise)
+       return willneed;
+ 
+    ret =
+diff --git a/src/freedreno/drm/msm/msm_device.c b/src/freedreno/drm/msm/msm_device.c
+index f06c7da..80e88d4 100644
+--- a/src/freedreno/drm/msm/msm_device.c
++++ b/src/freedreno/drm/msm/msm_device.c
+@@ -56,5 +56,17 @@ msm_device_new(int fd, drmVersionPtr version)
+ 
+    dev->bo_size = sizeof(struct msm_bo);
+ 
++   {
++      /* Xenos (gpu_id 290, xegpu): madvise is a no-op, and two ioctls per batch
++       * cost ~15% of a small submit on the Xenon CPU */
++      struct drm_msm_param req = { .pipe = MSM_PIPE_3D0, .param = MSM_PARAM_GPU_ID };
++      if (!drmCommandWriteRead(fd, DRM_MSM_GET_PARAM, &req, sizeof(req)) && req.value == 290) {
++         msm_dev->no_madvise = true;
++         /* xegpu maps MSM_BO_CACHED_COHERENT buffers cached and writes them back at
++          * submit; Mesa uses that for command streams */
++         dev->has_cached_coherent = true;
++      }
++   }
++
+    return dev;
+ }
+diff --git a/src/freedreno/drm/msm/msm_priv.h b/src/freedreno/drm/msm/msm_priv.h
+index be1d64f..79742ab 100644
+--- a/src/freedreno/drm/msm/msm_priv.h
++++ b/src/freedreno/drm/msm/msm_priv.h
+@@ -26,6 +26,7 @@
+ 
+ struct msm_device {
+    struct fd_device base;
++   bool no_madvise;   /* Xbox 360 xegpu never purges buffers: skip the ioctl */
+ };
+ FD_DEFINE_CAST(fd_device, msm_device);
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+index 6f6fad3..789fadb 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_xenos.h
+@@ -117,8 +117,18 @@ static inline uint32_t fd2_xenos_coher_bits(void)
+ }
+ #define XENOS_REG_COHER_SIZE_HOST   0x0a2f
+ #define XENOS_REG_COHER_STATUS_HOST 0x0a31
++static inline bool
++fd2_xenos_skip_full_inval(void)
++{
++   static int v = -1;
++   if (v < 0)
++      v = getenv("XENOS_SKIP_FULL_INVAL") != NULL;   /* experiment hook */
++   return v;
++}
++
+ #define fd2_xenos_invalidate_caches(ring)                                      \
+    do {                                                                        \
++      if (fd2_xenos_skip_full_inval()) break;                                  \
+       OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);                          \
+       OUT_RING(ring, fd2_xenos_coher_bits());                                  \
+       OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);                            \
+-- 
+2.53.0
+

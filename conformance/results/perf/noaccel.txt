@@ -1,0 +1,13 @@
+noaccel -rect10: 8000000 trep @   0.0006 msec (1670000.0/sec): 10x10 rectangle
+noaccel -rect500: 12000 trep @   0.3241 msec (  3090.0/sec): 500x500 rectangle
+noaccel -copywinwin10: 560000 trep @   0.0073 msec (136000.0/sec): Copy 10x10 from window to window
+noaccel -copywinwin500: 2400 trep @   2.0553 msec (   487.0/sec): Copy 500x500 from window to window
+noaccel -putimage10: 640000 trep @   0.0065 msec (154000.0/sec): PutImage 10x10 square
+noaccel -putimage500: 720 trep @   6.4858 msec (   154.0/sec): PutImage 500x500 square
+noaccel -shmput500: 1600 trep @   3.1161 msec (   321.0/sec): ShmPutImage 500x500 square
+noaccel -aa10text: 1280000 trep @   0.0034 msec (290000.0/sec): Char in 80-char aa line (Charter 10)
+noaccel -aa24text: 384000 trep @   0.0112 msec ( 89100.0/sec): Char in 30-char aa line (Charter 24)
+noaccel -comppixwin500: 1600 trep @   2.9517 msec (   339.0/sec): Composite 500x500 from pixmap to window
+noaccel -oddtilerect100: 57600 trep @   0.0707 msec ( 14100.0/sec): 100x100 tiled rectangle (17x15 tile)
+noaccel -scroll500: 4000 trep @   1.1067 msec (   904.0/sec): Scroll 500x500 pixels
+noaccel stalls 0 timeouts 0

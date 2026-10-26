@@ -1,7 +1,7 @@
 From c42df77dc32c5ee528eb0e3edd111389baa362fa Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 16:23:22 -0700
-Subject: [PATCH 07/22] freedreno/xenos: resolve rectangle = framebuffer size,
+Subject: [PATCH 07/24] freedreno/xenos: resolve rectangle = framebuffer size,
  not the padded bin
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From db569508e61dffdd6b04036c19119308ceb45d9d Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 06:15:07 -0700
-Subject: [PATCH 20/22] freedreno/xenos: no 8in16 swap for 8-bit-channel array
+Subject: [PATCH 20/24] freedreno/xenos: no 8in16 swap for 8-bit-channel array
  formats (L8A8 had L and A swapped)
 
 Generated-by: LLM

@@ -1,7 +1,7 @@
 From 6000973a3dc308e8489fb92a661468fc91740911 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 21:40:40 -0700
-Subject: [PATCH 11/22] freedreno/xenos: VS exports its dummy parameter after
+Subject: [PATCH 11/24] freedreno/xenos: VS exports its dummy parameter after
  position (Xenos waits for every allocated export)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

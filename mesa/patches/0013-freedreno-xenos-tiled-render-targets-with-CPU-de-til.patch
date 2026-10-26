@@ -1,7 +1,7 @@
 From 49abd713fb96f3c25ee6b712a9abf7deec4ac703 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 22:07:27 -0700
-Subject: [PATCH 13/22] freedreno/xenos: tiled render targets with CPU
+Subject: [PATCH 13/24] freedreno/xenos: tiled render targets with CPU
  (de)tiling transfers, resolve swap fix, tiled restore texture
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

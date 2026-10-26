@@ -30,6 +30,6 @@ LD_LIBRARY_PATH=/opt/mesa-xenos/lib PIXMAN_DISABLE=vmx \
 
 ## Open
 
-- Performance: whole-framebuffer bins mean every batch restores and resolves 1280x720. Next steps are a copy-destination offset done by moving the resolve base along 32x32 macro tiles, and skipping restores when the batch clears.
+- Performance: see [performance.md](performance.md). Restores and resolves now cover only each batch's scissor bounds.
 - Xfce under glamor hasn't been tried for long sessions yet.
 - glamor still falls back to software for depth 8, 15 and 16.

@@ -1,7 +1,7 @@
 From 0df53e567bf37dd54c2a51797b9bf08c893d28c8 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 01:47:13 -0700
-Subject: [PATCH 17/22] freedreno/xenos: index DMA size in 16-bit words, no
+Subject: [PATCH 17/24] freedreno/xenos: index DMA size in 16-bit words, no
  8-bit indices, resolve endian 3 for byte-reversed formats
 
 - VGT_DMA_SIZE counts 16-bit words on Xenos (libxenon: count << indextype); bytes made

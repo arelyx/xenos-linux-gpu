@@ -1,0 +1,244 @@
+From e02b1f323eb6a099e2fd0cbca7d91fe6425c3d04 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 10:33:55 -0700
+Subject: [PATCH 23/24] freedreno/xenos: faster transfers and partial resolves
+
+- CPU (de)tiling copies 16-byte contiguous runs (8 for 1-byte texels) instead of
+  one texel at a time.
+- Resolve and restore only the batch's scissor bounds, in 8-pixel blocks (Xenos
+  resolves keep the rectangle's x, y in the destination).
+- Blit-based texture transfers on Xenos, limited by a new pipe cap
+  (texture_transfer_blit_min_pixels) to >= 128x128 transfers of 4-byte texels:
+  x11perf putimage500 29.9 -> 147/s, shmput500 32 -> 332/s, small uploads unchanged.
+
+dEQP-GLES2 1-in-20 sample: 98.2%, no regressions against the full run.
+
+Generated-by: LLM
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 72 ++++++++++++++-----
+ .../drivers/freedreno/freedreno_resource.c    | 10 ++-
+ .../drivers/freedreno/freedreno_screen.c      |  6 +-
+ src/gallium/include/pipe/p_defines.h          |  3 +
+ src/mesa/state_tracker/st_cb_readpixels.c     |  5 ++
+ src/mesa/state_tracker/st_cb_texture.c        |  5 ++
+ 6 files changed, 78 insertions(+), 23 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 654f019..843f241 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -70,6 +70,26 @@ use_hw_binning(struct fd_batch *batch)
+    return fd_binning_enabled && ((gmem->nbins_x * gmem->nbins_y) > 2);
+ }
+ 
++
++/* Xenos: the part of the (single, origin) bin a batch touched, in 8-pixel blocks.
++ * Restores and resolves only cover it: a resolve copies its rectangle to the same
++ * (x, y) in the destination (Xenia draw_util GetResolveInfo). */
++static void
++xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x1, unsigned *y1)
++{
++   struct pipe_framebuffer_state *pfb = &batch->framebuffer;
++   const struct pipe_scissor_state *ms = &batch->max_scissor;
++   *x0 = 0; *y0 = 0; *x1 = pfb->width; *y1 = pfb->height;
++   if (!getenv("XENOS_FULL_RESOLVE") && ms->minx <= ms->maxx && ms->miny <= ms->maxy) {
++      *x0 = MIN2(ms->minx, pfb->width) & ~7u;
++      *y0 = MIN2(ms->miny, pfb->height) & ~7u;
++      *x1 = MIN2(ms->maxx + 1u, (unsigned)pfb->width);
++      *y1 = MIN2(ms->maxy + 1u, (unsigned)pfb->height);
++   }
++   *x1 = MAX2(align(*x1, 8), *x0 + 8);
++   *y1 = MAX2(align(*y1, 8), *y0 + 8);
++}
++
+ /* transfer from gmem to system memory (ie. normal RAM) */
+ 
+ static void
+@@ -215,11 +235,17 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+          A2XX_PA_SU_SC_MODE_CNTL_FRONT_PTYPE(PC_DRAW_TRIANGLES) |
+          A2XX_PA_SU_SC_MODE_CNTL_BACK_PTYPE(PC_DRAW_TRIANGLES));
+ 
++   /* Xenos resolves place the copied rectangle at its own (x, y) in the destination
++    * (Xenia draw_util GetResolveInfo), and Xenos always renders one bin at the
++    * origin, so only the batch's scissor bounds need resolving, in 8-pixel blocks. */
++   unsigned rx0 = 0, ry0 = 0, rx1 = pfb->width, ry1 = pfb->height;
++   if (is_xenos(ctx->screen))
++      xenos_dirty_rect(batch, &rx0, &ry0, &rx1, &ry1);
++
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
+-   OUT_RING(ring, xy2d(0, 0));                    /* PA_SC_WINDOW_SCISSOR_TL */
+-   OUT_RING(ring, is_xenos(ctx->screen) ? xy2d(align(pfb->width, 8), align(pfb->height, 8))
+-                                        : xy2d(pfb->width, pfb->height)); /* PA_SC_WINDOW_SCISSOR_BR */
++   OUT_RING(ring, xy2d(rx0, ry0));                /* PA_SC_WINDOW_SCISSOR_TL */
++   OUT_RING(ring, xy2d(rx1, ry1));                /* PA_SC_WINDOW_SCISSOR_BR */
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
+@@ -233,14 +259,14 @@ prepare_tile_fini_ib(struct fd_batch *batch) assert_dt
+        * kResolveAlignmentPixels, D3D9 rounds the same way) and a 4x2 resolve
+        * (the small mip levels of glGenerateMipmap/glCopyTexImage) wedges the GPU.
+        * Levels are padded to 32x32 in memory, so the extra pixels stay inside. */
+-      float rw = is_xenos(ctx->screen) ? (float)align(pfb->width, 8) : (float)gmem->bin_w;
+-      float rh = is_xenos(ctx->screen) ? (float)align(pfb->height, 8) : (float)gmem->bin_h;
++      float rw = is_xenos(ctx->screen) ? (float)(rx1 - rx0) : (float)gmem->bin_w;
++      float rh = is_xenos(ctx->screen) ? (float)(ry1 - ry0) : (float)gmem->bin_h;
+       OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+       OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
+-      OUT_RING(ring, fui(rw / 2.0f)); /* XSCALE */
+-      OUT_RING(ring, fui(rw / 2.0f)); /* XOFFSET */
+-      OUT_RING(ring, fui(rh / 2.0f)); /* YSCALE */
+-      OUT_RING(ring, fui(rh / 2.0f)); /* YOFFSET */
++      OUT_RING(ring, fui(rw / 2.0f));       /* XSCALE */
++      OUT_RING(ring, fui(rx0 + rw / 2.0f)); /* XOFFSET */
++      OUT_RING(ring, fui(rh / 2.0f));       /* YSCALE */
++      OUT_RING(ring, fui(ry0 + rh / 2.0f)); /* YOFFSET */
+    }
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+@@ -341,8 +367,16 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+    struct pipe_framebuffer_state *pfb = &batch->framebuffer;
+    unsigned bin_w = tile->bin_w;
+    unsigned bin_h = tile->bin_h;
++   unsigned ox = tile->xoff, oy = tile->yoff, sx = 0, sy = 0;   /* sx, sy: rect origin in the bin */
+    float x0, y0, x1, y1;
+ 
++   if (is_xenos(ctx->screen)) {
++      unsigned rx0, ry0, rx1, ry1;
++      xenos_dirty_rect(batch, &rx0, &ry0, &rx1, &ry1);
++      ox = sx = rx0; oy = sy = ry0;
++      bin_w = rx1 - rx0; bin_h = ry1 - ry0;
++   }
++
+    fd2_emit_vertex_bufs(
+       ring, 0x9c,
+       (struct fd2_vertex_buf[]){
+@@ -352,10 +386,10 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+       2);
+ 
+    /* write texture coordinates to vertexbuf: */
+-   x0 = ((float)tile->xoff) / ((float)pfb->width);
+-   x1 = ((float)tile->xoff + bin_w) / ((float)pfb->width);
+-   y0 = ((float)tile->yoff) / ((float)pfb->height);
+-   y1 = ((float)tile->yoff + bin_h) / ((float)pfb->height);
++   x0 = ((float)ox) / ((float)pfb->width);
++   x1 = ((float)ox + bin_w) / ((float)pfb->width);
++   y0 = ((float)oy) / ((float)pfb->height);
++   y1 = ((float)oy + bin_h) / ((float)pfb->height);
+    if (is_xenos(ctx->screen)) {
+       /* Xenos MEM_WRITE stores only the first data dword: one packet per value.
+        * The CP stores it little-endian, while vertex data is fetched 8in32 on
+@@ -426,15 +460,15 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
+    OUT_RING(ring, A2XX_PA_SC_WINDOW_OFFSET_DISABLE |
+-                     xy2d(0, 0));      /* PA_SC_WINDOW_SCISSOR_TL */
+-   OUT_RING(ring, xy2d(bin_w, bin_h)); /* PA_SC_WINDOW_SCISSOR_BR */
++                     xy2d(sx, sy));                  /* PA_SC_WINDOW_SCISSOR_TL */
++   OUT_RING(ring, xy2d(sx + bin_w, sy + bin_h));    /* PA_SC_WINDOW_SCISSOR_BR */
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
+-   OUT_RING(ring, fui((float)bin_w / 2.0f));  /* PA_CL_VPORT_XSCALE */
+-   OUT_RING(ring, fui((float)bin_w / 2.0f));  /* PA_CL_VPORT_XOFFSET */
+-   OUT_RING(ring, fui(-(float)bin_h / 2.0f)); /* PA_CL_VPORT_YSCALE */
+-   OUT_RING(ring, fui((float)bin_h / 2.0f));  /* PA_CL_VPORT_YOFFSET */
++   OUT_RING(ring, fui((float)bin_w / 2.0f));       /* PA_CL_VPORT_XSCALE */
++   OUT_RING(ring, fui(sx + (float)bin_w / 2.0f));  /* PA_CL_VPORT_XOFFSET */
++   OUT_RING(ring, fui(-(float)bin_h / 2.0f));      /* PA_CL_VPORT_YSCALE */
++   OUT_RING(ring, fui(sy + (float)bin_h / 2.0f));  /* PA_CL_VPORT_YOFFSET */
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VTE_CNTL));
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 4276c31..f5c17dc 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -788,14 +788,18 @@ xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *
+    uint8_t *tiled = (uint8_t *)fd_bo_map(rsc->bo) + fd_resource_offset(rsc, level, box->z);
+    unsigned cpp = rsc->layout.cpp;
+    unsigned pitch_px = fd_resource_pitch(rsc, level) / cpp;
++   /* texels are contiguous in runs of 16 bytes (8 for 1-byte texels), aligned in x */
++   unsigned run = cpp == 1 ? 8 : MAX2(1, 16 / cpp);
+    for (int y = 0; y < box->height; y++) {
+-      for (int x = 0; x < box->width; x++) {
++      for (int x = 0; x < box->width;) {
++         unsigned n = MIN2(run - (box->x + x) % run, box->width - x);
+          uint8_t *t = tiled + (size_t)xenos_tiled_texel(box->x + x, box->y + y, pitch_px, cpp) * cpp;
+          uint8_t *l = linear + (size_t)y * stride + (size_t)x * cpp;
+          if (to_linear)
+-            memcpy(l, t, cpp);
++            memcpy(l, t, n * cpp);
+          else
+-            memcpy(t, l, cpp);
++            memcpy(t, l, n * cpp);
++         x += n;
+       }
+    }
+ }
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 9eb7bd8..688da2f 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -433,7 +433,11 @@ fd_init_screen_caps(struct fd_screen *screen)
+ 
+    caps->compute = has_compute(screen);
+ 
+-   caps->texture_transfer_modes = screen->gen >= 6 ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
++   /* Xenos: GL buffers are uncached and tiled, so let the GPU convert and tile
++    * uploads/readbacks instead of the CPU (x11perf putimage) */
++   caps->texture_transfer_modes = (screen->gen >= 6 || is_xenos(screen)) ? PIPE_TEXTURE_TRANSFER_BLIT : 0;
++   /* a blit costs ~0.5 ms of setup on Xenos: small uploads are faster on the CPU */
++   caps->texture_transfer_blit_min_pixels = is_xenos(screen) ? 128 * 128 : 0;
+ 
+    caps->pci_group =
+    caps->pci_bus =
+diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
+index 85e4e9f..aed0266 100644
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -1126,6 +1126,9 @@ struct pipe_caps {
+    unsigned linear_image_base_address_alignment;
+    /* pipe_texture_transfer_mode */
+    unsigned texture_transfer_modes;
++   /* With PIPE_TEXTURE_TRANSFER_BLIT: blit only transfers of at least this many
++    * pixels with 4-byte texels; smaller ones take the CPU path (0: no limit). */
++   unsigned texture_transfer_blit_min_pixels;
+    /* pipe_quirk_texture_border_color_swizzle */
+    unsigned texture_border_color_quirk;
+    unsigned max_texel_buffer_elements;
+diff --git a/src/mesa/state_tracker/st_cb_readpixels.c b/src/mesa/state_tracker/st_cb_readpixels.c
+index cf28b3b..a622cfb 100644
+--- a/src/mesa/state_tracker/st_cb_readpixels.c
++++ b/src/mesa/state_tracker/st_cb_readpixels.c
+@@ -460,6 +460,11 @@ st_ReadPixels(struct gl_context *ctx, GLint x, GLint y,
+    /* This must be done after state validation. */
+    src = rb->texture;
+ 
++   if (st->screen->caps.texture_transfer_blit_min_pixels &&
++       ((uint64_t)width * height < st->screen->caps.texture_transfer_blit_min_pixels ||
++        util_format_get_blocksize(src->format) != 4))
++      goto fallback;
++
+    /* XXX Fallback for depth-stencil formats due to an incomplete
+     * stencil blit implementation in some drivers. */
+    if (format == GL_DEPTH_STENCIL) {
+diff --git a/src/mesa/state_tracker/st_cb_texture.c b/src/mesa/state_tracker/st_cb_texture.c
+index 21bac1c..d989c57 100644
+--- a/src/mesa/state_tracker/st_cb_texture.c
++++ b/src/mesa/state_tracker/st_cb_texture.c
+@@ -2223,6 +2223,11 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
+       goto fallback;
+    }
+ 
++   if (screen->caps.texture_transfer_blit_min_pixels &&
++       ((uint64_t)width * height * depth < screen->caps.texture_transfer_blit_min_pixels ||
++        util_format_get_blocksize(dst->format) != 4))
++      goto fallback;
++
+    /* If the base internal format and the texture format don't match,
+     * we can't use blit-based TexSubImage. */
+    if (texImage->_BaseFormat !=
+-- 
+2.53.0
+

@@ -1,7 +1,7 @@
 From ec95b58bf5ca64a5c7be3ea6aa5bc12a11cbc5f3 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 09:32:14 -0700
-Subject: [PATCH 22/22] freedreno/xenos: whole-framebuffer bins (no
+Subject: [PATCH 22/24] freedreno/xenos: whole-framebuffer bins (no
  RB_COPY_DEST_OFFSET); big-endian BGRA/8_8_8_8_REV for glamor; rd dumps per
  device
 

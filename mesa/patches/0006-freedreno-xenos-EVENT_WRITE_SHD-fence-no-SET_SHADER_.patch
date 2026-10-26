@@ -1,7 +1,7 @@
 From 1d707bb8a6da7a453e55c53c35ce5637afa280ef Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 16:13:32 -0700
-Subject: [PATCH 06/22] freedreno/xenos: EVENT_WRITE_SHD fence, no
+Subject: [PATCH 06/24] freedreno/xenos: EVENT_WRITE_SHD fence, no
  SET_SHADER_BASES / inst-store override, no non-Xenos registers
  (RB_COLOR_DEST_MASK, 0x2010)
 

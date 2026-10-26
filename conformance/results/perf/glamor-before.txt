@@ -1,0 +1,13 @@
+glamor -rect10: 1400000 trep @   0.0031 msec (319000.0/sec): 10x10 rectangle
+glamor -rect500: 40000 trep @   0.1047 msec (  9550.0/sec): 500x500 rectangle
+glamor -copywinwin10: 6400 trep @   0.6382 msec (  1570.0/sec): Copy 10x10 from window to window
+glamor -copywinwin500: 4000 trep @   1.2381 msec (   808.0/sec): Copy 500x500 from window to window
+glamor -putimage10: 24000 trep @   0.1794 msec (  5580.0/sec): PutImage 10x10 square
+glamor -putimage500: 160 trep @  33.4222 msec (    29.9/sec): PutImage 500x500 square
+glamor -shmput500: 160 trep @  30.9180 msec (    32.3/sec): ShmPutImage 500x500 square
+glamor -aa10text: 800000 trep @   0.0060 msec (166000.0/sec): Char in 80-char aa line (Charter 10)
+glamor -aa24text: 512000 trep @   0.0080 msec (125000.0/sec): Char in 30-char aa line (Charter 24)
+glamor -comppixwin500: 40000 trep @   0.1022 msec (  9790.0/sec): Composite 500x500 from pixmap to window
+glamor -oddtilerect100: 432000 trep @   0.0097 msec (103000.0/sec): 100x100 tiled rectangle (17x15 tile)
+glamor -scroll500: 4000 trep @   1.2376 msec (   808.0/sec): Scroll 500x500 pixels
+glamor stalls 0 timeouts 0

@@ -1,7 +1,7 @@
 From 1f2644647df961e4bedd9fa915210b3705373de8 Mon Sep 17 00:00:00 2001
 From: xenos <xenos@localhost>
 Date: Sun, 25 Oct 2026 14:02:28 -0700
-Subject: [PATCH 03/22] freedreno/a2xx: own packing macro so util/macros.h
+Subject: [PATCH 03/24] freedreno/a2xx: own packing macro so util/macros.h
  can't drop the LE storage order; debug hooks
 
 instr-a2xx.h included util/macros.h (via fd2_hw.h) after defining PACKED, which
