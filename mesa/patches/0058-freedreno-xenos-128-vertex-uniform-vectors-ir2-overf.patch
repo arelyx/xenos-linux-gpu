@@ -1,0 +1,127 @@
+From 2e7a3bf70f4af56dfff12d893b7f631473e3af11 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 15:21:44 -0700
+Subject: [PATCH] freedreno/xenos: 128 vertex uniform vectors; ir2 overflow
+ fixes
+
+- Uniforms were capped at 64 vectors because the vertex shader read the
+  viewport for gl_FragCoord.z from C65/C66. Move those to C254/C255 on
+  Xenos and advertise 128 vertex / 112 fragment uniform vectors (GL 2.0
+  wants 128 in the vertex shader; ARB_vertex_program 96 parameters:
+  piglit vp-max-array, arb_vertex_program-minmax).
+- ir2 overflowed stack arrays on big shaders: sched_next's avail[0x100]
+  (stack smashing in dEQP uniform_api.random.3) and assemble's
+  block_addr[128]. Size them for the maximum.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c     | 4 ++--
+ src/gallium/drivers/freedreno/a2xx/ir2.c          | 4 +++-
+ src/gallium/drivers/freedreno/a2xx/ir2_assemble.c | 6 ++++--
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c      | 6 ++++--
+ src/gallium/drivers/freedreno/freedreno_screen.c  | 7 +++++++
+ 5 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index e7d8a14..cf46a8b 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -277,7 +277,7 @@ fd2_emit_state_binning(struct fd_context *ctx,
+       {
+          uint32_t vpc[8] = { fui(vp->translate[0]), fui(vp->translate[1]), fui(vp->translate[2]), fui(0.0f),
+                              fui(vp->scale[0]), fui(vp->scale[1]), fui(vp->scale[2]), fui(0.0f) };
+-         fd2_emit_alu_consts(ctx, ring, 0x184, vpc, 8);
++         fd2_emit_alu_consts(ctx, ring, fd2_xenos ? (VS_CONST_BASE + 254) * 4 : 0x184, vpc, 8);
+       }
+    }
+ 
+@@ -438,7 +438,7 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       {
+          uint32_t vpc[8] = { fui(vp->translate[0]), fui(vp->translate[1]), fui(vp->translate[2]), fui(0.0f),
+                              fui(vp->scale[0]), fui(vp->scale[1]), fui(vp->scale[2]), fui(0.0f) };
+-         fd2_emit_alu_consts(ctx, ring, 0x184, vpc, 8);
++         fd2_emit_alu_consts(ctx, ring, fd2_xenos ? (VS_CONST_BASE + 254) * 4 : 0x184, vpc, 8);
+       }
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 490ecf6..b64acc2 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -206,7 +206,9 @@ scalarize_case1(struct ir2_context *ctx, struct ir2_instr *instr, bool order)
+ static int
+ sched_next(struct ir2_context *ctx, struct ir2_sched_instr *sched)
+ {
+-   struct ir2_instr *avail[0x100], *instr_v = NULL, *instr_s = NULL;
++   /* every instruction can be ready at once (0x100 overflowed in dEQP
++    * uniform_api.random.3 with 128 uniforms) */
++   struct ir2_instr *avail[IR2_MAX_INSTR], *instr_v = NULL, *instr_s = NULL;
+    unsigned avail_count = 0;
+ 
+    instr_alloc_type_t export = ~0u;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index c9e2436..c417506 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -376,7 +376,7 @@ assemble(struct ir2_context *ctx, bool binning)
+     */
+    instr_cf_t cfs[IR2_MAX_SCHED];
+    instr_t bytecode[IR2_MAX_SCHED], bc;
+-   unsigned block_addr[128];
++   unsigned block_addr[IR2_MAX_SCHED + 1];   /* one per block; 128 overflowed (dEQP uniform_api.random.3) */
+    unsigned num_cf = 0;
+ 
+    /* CF instr state */
+@@ -472,8 +472,10 @@ assemble(struct ir2_context *ctx, bool binning)
+       }
+ 
+       /* update block_addrs for jmp patching */
+-      while (block_idx < block)
++      while (block_idx < block) {
++         assert(block_idx < IR2_MAX_SCHED);
+          block_addr[++block_idx] = num_cf;
++      }
+ 
+       /* export - fill alloc cf */
+       if (!is_fetch && bc.alu.export_data) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 3189fc9..ee1dbed 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -1083,9 +1083,11 @@ extra_position_exports(struct ir2_context *ctx, bool binning)
+    sc->src[1] = ir2_src(rcp->idx, IR2_SWIZZLE_XXXX, IR2_SRC_SSA);
+ 
+    wincoord = instr_create_alu(ctx, nir_op_fmad, 4);
+-   wincoord->src[0] = ir2_src(66, 0, IR2_SRC_CONST);
++   /* viewport scale/translate (fd2_emit.c): C66/C65, on Xenos C255/C254 so
++    * that uniforms can use the registers above 64 */
++   wincoord->src[0] = ir2_src(ctx->so->is_xenos ? 255 : 66, 0, IR2_SRC_CONST);
+    wincoord->src[1] = ir2_src(sc->idx, 0, IR2_SRC_SSA);
+-   wincoord->src[2] = ir2_src(65, 0, IR2_SRC_CONST);
++   wincoord->src[2] = ir2_src(ctx->so->is_xenos ? 254 : 65, 0, IR2_SRC_CONST);
+ 
+    /* fragcoord z/w */
+    if (ctx->f->fragcoord >= 0 && !binning) {
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index ef6d24b..a7fef5a 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -266,6 +266,13 @@ fd_init_shader_caps(struct fd_screen *screen)
+        */
+       caps->max_const_buffer0_size =
+          (is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen) ? 4096 : 64) * sizeof(float[4]);
++      /* Xenos: each stage has 256 constant registers (pixel shader from
++       * 0x120, of which IR2_SHADOW_CONST.. are the driver's); uniforms plus
++       * up to 64 immediates must fit. GL 2.0 wants 128 vertex uniform
++       * vectors (and ARB_vertex_program 96 parameters: piglit vp-max-array) */
++      if (is_xenos(screen))
++         caps->max_const_buffer0_size =
++            (i == MESA_SHADER_VERTEX ? 128 : 112) * sizeof(float[4]);
+ 
+       caps->max_const_buffers = is_ir3(screen) ? 16 : 1;
+ 
+-- 
+2.53.0
+

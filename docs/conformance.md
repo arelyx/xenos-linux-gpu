@@ -95,3 +95,5 @@ Tenth pass (gl20-10, Mesa 0054-0056): 1,004 pass, **88.1%** of executed, no hang
 
 Eleventh pass (gl20-11, Mesa 0057: polygon offset slope in 1/16-pixel units, triangle fans over 32,766 vertices drawn as indexed lists): 1,007 pass, **88.4%** of executed, no regressions. dEQP full22: 99.8% (17,044 of 17,075), 49 cases back from NotSupported against full21, `uniform_api.random.60` NotSupported (15 fragment units).
 
+Twelfth pass (gl20-12, Mesa 0058: 128 vertex / 112 fragment uniform vectors, the gl_FragCoord.z viewport constants moved from C65/C66 to C254/C255, two ir2 stack overflows on big shaders fixed): 1,009 pass, **88.6%** of executed, no regressions. dEQP full23: 99.8%; two large `texture.size` cases out of GPU memory this run, and `uniform_api.random.3` now links and aborts in register allocation instead of failing to compile.
+
