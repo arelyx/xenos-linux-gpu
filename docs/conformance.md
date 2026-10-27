@@ -47,11 +47,13 @@ Latest full run: full9 (`results/full9-report.txt`, 26 October evening), **99.7%
 
 History: full3 98.0%. full6 98.3% after the performance work (49 fixed, 5 regressed: four order-dependent `fbo.render` cases and a 512x512 cube out of memory). full7 98.3%: the order-dependent cases were a stale texture cache (hardware rule 14). full8 98.3% after the glmark2 fixes; `random_teximage2d.cube_7` passed by luck in full7.
 
-What still fails in full9 (50 cases):
+full10 (`results/full10-report.txt`) fixed the 14 `fbo.render.recreate_colorbuffer` cases: a color-only clear kept the application's depth test (Mesa patch 0036). It also shows 9 `GL_OUT_OF_MEMORY` cases because the Xfce session was still running and holding GPU pool memory; 8 pass on a rerun without it (`gl-ready.sh` now stops the session). Counting those, 17,038 of 17,075 executed cases pass (99.8%).
+
+What still failed in full9 (50 cases; the first row is fixed in full10):
 
 | cases | what | notes |
 |---:|---|---|
-| 14 | `fbo.render.recreate_colorbuffer.*` | to investigate |
+| 14 | `fbo.render.recreate_colorbuffer.*` | fixed in full10: color-only clears kept the depth test |
 | 8 | `shaders.indexing.tmp_array.*` (Crash) | ir2 can't compile dynamically indexed temporary arrays; it aborts instead of hanging the GPU |
 | 6 | `texture.mipmap.2d.projected.*` | projected mipmap level selection |
 | 6 | `texture.size` 2048x2048 mipmapped, 512 cube (ResourceError) | out of GPU pool memory (48 MB) |

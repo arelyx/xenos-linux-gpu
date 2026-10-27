@@ -1,0 +1,37 @@
+From 32da04c7c6704e6415adb397fa77a3a63bb1da9d Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 19:36:10 -0700
+Subject: [PATCH] freedreno/a2xx: color-only clears turn depth and stencil
+ tests off
+
+clear_state() wrote RB_DEPTHCONTROL only when clearing depth or stencil,
+so a color-only clear drawn after other draws in the batch kept the
+application's depth (and stencil) test and only reached pixels that passed
+it. dEQP fbo.render.recreate_colorbuffer.no_rebind_*_depth/stencil (14
+cases) showed the old color where the depth buffer was nearer.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 919e937..0ba81b8 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -297,7 +297,9 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+       OUT_RING(ring, A2XX_TC_CNTL_STATUS_L2_INVALIDATE);
+    }
+ 
+-   if (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)) {
++   /* always: a color-only clear left the application's depth and stencil
++    * tests on, so it only reached pixels that passed them */
++   {
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTHCONTROL));
+       reg = 0;
+-- 
+2.53.0
+
