@@ -93,3 +93,5 @@ Ninth pass (gl20-9, Mesa 0052 and 0053): 969 pass, **85.1%** of executed, no han
 
 Tenth pass (gl20-10, Mesa 0054-0056): 1,004 pass, **88.1%** of executed, no hangs, 35 fixed, 0 regressed. Mesa 0056 makes `gl_FragCoord.z` linear in screen space (it was interpolated perspective-correctly) and splits the 32 fetch constants: 0-11 fragment textures, 12-19 and 26-31 vertex textures, 20-25 vertex buffers. Advertising 16 + 16 had let vertex textures overwrite the vertex buffers (`max-samplers`); dEQP full21 was run with an interim 16 + 4 split, which turned 47 `uniform_api` cases NotSupported; with 12 + 14 the 1,285 sampler and uniform cases match full20 except `uniform_api.random.60`, which needs 15 fragment units.
 
+Eleventh pass (gl20-11, Mesa 0057: polygon offset slope in 1/16-pixel units, triangle fans over 32,766 vertices drawn as indexed lists): 1,007 pass, **88.4%** of executed, no regressions. dEQP full22: 99.8% (17,044 of 17,075), 49 cases back from NotSupported against full21, `uniform_api.random.60` NotSupported (15 fragment units).
+

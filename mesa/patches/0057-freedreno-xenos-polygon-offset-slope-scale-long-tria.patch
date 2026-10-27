@@ -1,0 +1,147 @@
+From 17c71c7ae7eda82ee6a034fa2cc780073cd9925e Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 13:47:38 -0700
+Subject: [PATCH] freedreno/xenos: polygon offset slope scale, long triangle
+ fans
+
+- PA_SU_POLY_OFFSET_*_SCALE is in 1/16-pixel units (Xenia draw_util.h):
+  the slope factor times 16, not 2 (piglit gl-1.4-polygon-offset; dEQP's
+  polygon_offset cases unchanged).
+- Draws are split into pieces of at most 32766 vertices, which a triangle
+  fan can't be; fd2 dropped longer fans (and polygons). Draw them as
+  indexed triangle lists.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 19 ++++--
+ .../drivers/freedreno/freedreno_draw.c        | 66 +++++++++++++++++++
+ 2 files changed, 79 insertions(+), 6 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 0f79180..e7d8a14 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -375,14 +375,21 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+          /* TODO: why multiply scale by 2 ? without it deqp test fails
+           * deqp/piglit tests aren't very precise
+           */
++         float scale = rasterizer->base.offset_scale * 2.0f;
++         float units = rasterizer->base.offset_units;   /* steps of the depth buffer */
++         if (fd2_xenos) {
++            /* Xenos: the slope scale is in 1/16-pixel units (Xenia
++             * draw_util.h; piglit gl-1.4-polygon-offset). The constant
++             * offset as is passed piglit's minimum resolvable difference
++             * check. */
++            scale = rasterizer->base.offset_scale * 16.0f;
++         }
+          OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+          OUT_RING(ring, CP_REG(REG_A2XX_PA_SU_POLY_OFFSET_FRONT_SCALE));
+-         OUT_RING(ring,
+-                  fui(rasterizer->base.offset_scale * 2.0f)); /* FRONT_SCALE */
+-         OUT_RING(ring, fui(rasterizer->base.offset_units));  /* FRONT_OFFSET */
+-         OUT_RING(ring,
+-                  fui(rasterizer->base.offset_scale * 2.0f)); /* BACK_SCALE */
+-         OUT_RING(ring, fui(rasterizer->base.offset_units));  /* BACK_OFFSET */
++         OUT_RING(ring, fui(scale)); /* FRONT_SCALE */
++         OUT_RING(ring, fui(units)); /* FRONT_OFFSET */
++         OUT_RING(ring, fui(scale)); /* BACK_SCALE */
++         OUT_RING(ring, fui(units)); /* BACK_OFFSET */
+       }
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.c b/src/gallium/drivers/freedreno/freedreno_draw.c
+index ae0b382..24c640f 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.c
++++ b/src/gallium/drivers/freedreno/freedreno_draw.c
+@@ -10,6 +10,7 @@
+ #include "util/format/u_format.h"
+ #include "util/u_draw.h"
+ #include "util/u_helpers.h"
++#include "util/u_inlines.h"
+ #include "util/u_memory.h"
+ #include "util/u_prim.h"
+ #include "util/u_string.h"
+@@ -317,6 +318,66 @@ needs_indirect_barrier(struct fd_batch *batch, struct pipe_resource *prsc)
+    return needs_barrier;
+ }
+ 
++/* Xenos: a draw is split into pieces of at most 32766 vertices, which a
++ * triangle fan can't be (every triangle uses the first vertex). Draw long
++ * fans as indexed triangle lists instead (piglit
++ * gl-1.1-drawarrays-vertex-count 100000 ... gl_triangle_fan). */
++static bool
++xenos_draw_long_fan(struct pipe_context *pctx, const struct pipe_draw_info *info,
++                    const struct pipe_draw_start_count_bias *draw) in_dt
++{
++   unsigned n = draw->count;
++   const void *src = NULL;
++   struct pipe_transfer *xfer = NULL;
++   if (info->index_size) {
++      if (info->has_user_indices)
++         src = (const uint8_t *)info->index.user + draw->start * info->index_size;
++      else
++         src = pipe_buffer_map_range(pctx, info->index.resource, draw->start * info->index_size,
++                                     n * info->index_size, PIPE_MAP_READ, &xfer);
++      if (!src)
++         return false;
++   }
++   uint32_t *idx = malloc(sizeof(uint32_t) * 3 * (n - 2));
++   if (!idx) {
++      if (xfer)
++         pipe_buffer_unmap(pctx, xfer);
++      return false;
++   }
++#define FAN_IDX(i) (!info->index_size ? draw->start + (i) :                    \
++                    info->index_size == 1 ? ((const uint8_t *)src)[i] :         \
++                    info->index_size == 2 ? ((const uint16_t *)src)[i] :        \
++                                            ((const uint32_t *)src)[i])
++   for (unsigned t = 0; t < n - 2; t++) {
++      idx[3 * t] = FAN_IDX(t + 1);
++      idx[3 * t + 1] = FAN_IDX(t + 2);
++      idx[3 * t + 2] = FAN_IDX(0);
++   }
++#undef FAN_IDX
++   if (xfer)
++      pipe_buffer_unmap(pctx, xfer);
++
++   struct pipe_draw_info ti = *info;
++   ti.mode = MESA_PRIM_TRIANGLES;
++   ti.index_size = 4;
++   ti.has_user_indices = true;
++   ti.index.user = idx;
++   ti.primitive_restart = false;
++   struct pipe_draw_start_count_bias td = {
++      .start = 0,
++      .count = 3 * (n - 2),
++      .index_bias = info->index_size ? draw->index_bias : 0,
++   };
++   if (!info->index_size) {
++      ti.index_bounds_valid = true;
++      ti.min_index = draw->start;
++      ti.max_index = draw->start + n - 1;
++   }
++   pctx->draw_vbo(pctx, &ti, 0, NULL, &td, 1);
++   free(idx);
++   return true;
++}
++
+ static void
+ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+             unsigned drawid_offset,
+@@ -340,6 +401,11 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+    if (!fd_render_condition_check(pctx))
+       return;
+ 
++   if (is_xenos(ctx->screen) && info->mode == MESA_PRIM_TRIANGLE_FAN && num_draws == 1 &&
++       !indirect && !info->primitive_restart && draws[0].count > 32766 &&
++       xenos_draw_long_fan(pctx, info, &draws[0]))
++      return;
++
+    /* Upload a user index buffer. */
+    struct pipe_resource *indexbuf = NULL;
+    unsigned index_offset = 0;
+-- 
+2.53.0
+
