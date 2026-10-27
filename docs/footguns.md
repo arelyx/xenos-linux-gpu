@@ -58,3 +58,7 @@ Things that cost us hours. Most are obvious in hindsight.
 ## Format descriptions are endian-specific
 
 Mesa's `util_format_description` lists the channels of packed formats in memory order for the host. On big endian the first non-void channel of `Z24_UNORM_S8_UINT` is the 8-bit stencil, not the depth. fd2's `pipe2surface` took the number format from that channel, so packed depth textures were sampled as integers and every depth read 1.0, while `Z24X8_UNORM` (first non-void channel: depth) worked. Look at all channels, or at `util_format_has_depth`, before deciding anything from "the first channel".
+
+## Don't widen the screen scissor past the framebuffer for the depth restore
+
+The depth restore goes through the color path in 40-pixel partner strips. When the framebuffer width isn't a multiple of 80, some visible depth pixels sit in EDRAM columns past the width, so a restore stopping at the width leaves them stale. Restoring whole 80-pixel tiles with `PA_SC_SCREEN_SCISSOR` widened to match fixed a 64-pixel buffer and wedged the GPU on a 123-pixel one (the fence never completed; power cycle). It is harmless for GPU-only rendering, since EDRAM keeps its contents between batches, but data the CPU wrote into a depth/stencil buffer (stencil `glDrawPixels`) is lost in those columns.
