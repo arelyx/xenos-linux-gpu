@@ -1,0 +1,113 @@
+From 6ca30baf116a2e672637d2dfafec919074cb94c8 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:59:53 -0700
+Subject: [PATCH] dri, egl/x11: big-endian X11 windows show the right channel
+ order
+
+X servers import DRI3 buffers as DRM_FORMAT_XRGB8888/ARGB8888, which
+are little-endian (bytes B,G,R,A) on any host. On a big-endian host:
+
+- GLX picks the first config with matching channel sizes, which was
+  PIPE_FORMAT_BGRA8888 = A8R8G8B8 there (bytes A,R,G,B). List
+  B8G8R8A8/B8G8R8X8 first on big-endian.
+- EGL matches configs against the visual's masks, which describe X's
+  pixel word, not the bytes in the buffer. Byte-swap 8-bit-per-channel
+  visual masks before matching.
+
+Both es2gears_x11 (EGL) and glxgears (GLX) on Xbox 360 Xenos showed red
+and green swapped and blue as alpha; both are right now.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/egl/drivers/dri2/platform_x11.c    | 34 +++++++++++++++++++-------
+ src/gallium/frontends/dri/dri_screen.c |  9 +++++++
+ 2 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/src/egl/drivers/dri2/platform_x11.c b/src/egl/drivers/dri2/platform_x11.c
+index 292931c..ad02ebd 100644
+--- a/src/egl/drivers/dri2/platform_x11.c
++++ b/src/egl/drivers/dri2/platform_x11.c
+@@ -48,6 +48,8 @@
+ #include "util/bitscan.h"
+ #include "util/macros.h"
+ #include "util/u_debug.h"
++#include "util/u_endian.h"
++#include "util/u_math.h"
+ #include "util/log.h"
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -612,16 +614,32 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
+ 
+          class_added[visuals[i]._class] = EGL_TRUE;
+ 
++         uint32_t red_mask = visuals[i].red_mask, green_mask = visuals[i].green_mask,
++                  blue_mask = visuals[i].blue_mask;
++#if UTIL_ARCH_BIG_ENDIAN
++         /* X servers import DRI3 buffers as DRM_FORMAT_[AX]RGB8888, which are
++          * little-endian whatever the host: the visual's 0x00ff0000 red is the
++          * third byte in memory, i.e. bits 8-15 of a big-endian word. Match
++          * configs against the masks as they lie in memory, or EGL windows show
++          * red and green swapped and blue as alpha. */
++         if (util_bitcount(red_mask) == 8 && util_bitcount(green_mask) == 8 &&
++             util_bitcount(blue_mask) == 8) {
++            red_mask = util_bswap32(red_mask);
++            green_mask = util_bswap32(green_mask);
++            blue_mask = util_bswap32(blue_mask);
++         }
++#endif
++
+          const int rgb_shifts[3] = {
+-            ffs(visuals[i].red_mask) - 1,
+-            ffs(visuals[i].green_mask) - 1,
+-            ffs(visuals[i].blue_mask) - 1,
++            ffs(red_mask) - 1,
++            ffs(green_mask) - 1,
++            ffs(blue_mask) - 1,
+          };
+ 
+          const unsigned int rgb_sizes[3] = {
+-            util_bitcount(visuals[i].red_mask),
+-            util_bitcount(visuals[i].green_mask),
+-            util_bitcount(visuals[i].blue_mask),
++            util_bitcount(red_mask),
++            util_bitcount(green_mask),
++            util_bitcount(blue_mask),
+          };
+ 
+          const EGLint config_attrs[] = {
+@@ -662,9 +680,7 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
+              * wants... especially on drivers that only have 32-bit RGBA
+              * EGLConfigs! */
+             if (sizes[3] != 0) {
+-               unsigned int rgba_mask =
+-                  ~(visuals[i].red_mask | visuals[i].green_mask |
+-                    visuals[i].blue_mask);
++               unsigned int rgba_mask = ~(red_mask | green_mask | blue_mask);
+ 
+                if (shifts[3] != ffs(rgba_mask) - 1 ||
+                    sizes[3] != util_bitcount(rgba_mask))
+diff --git a/src/gallium/frontends/dri/dri_screen.c b/src/gallium/frontends/dri/dri_screen.c
+index cb43894..87890b4 100644
+--- a/src/gallium/frontends/dri/dri_screen.c
++++ b/src/gallium/frontends/dri/dri_screen.c
+@@ -313,6 +313,15 @@ dri_fill_in_modes(struct dri_screen *screen)
+     * channel masks when matching EGLConfig to struct dri_config.
+     */
+    static const enum pipe_format pipe_formats[] = {
++#if UTIL_ARCH_BIG_ENDIAN
++      /* Big-endian hosts: PIPE_FORMAT_BGRA8888 below is A8R8G8B8 (bytes A,R,G,B),
++       * but X servers here import DRI3 buffers as DRM_FORMAT_XRGB8888/ARGB8888,
++       * which are little-endian (bytes B,G,R,A), and GLX picks the first config
++       * with matching channel sizes (see above). List the byte-order formats
++       * first, or GLX windows show red and green swapped and blue as alpha. */
++      PIPE_FORMAT_B8G8R8A8_UNORM,
++      PIPE_FORMAT_B8G8R8X8_UNORM,
++#endif
+       PIPE_FORMAT_B10G10R10A2_UNORM,
+       PIPE_FORMAT_B10G10R10X2_UNORM,
+       PIPE_FORMAT_R10G10B10A2_UNORM,
+-- 
+2.53.0
+

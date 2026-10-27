@@ -49,6 +49,8 @@ History: full3 98.0%. full6 98.3% after the performance work (49 fixed, 5 regres
 
 full10 (`results/full10-report.txt`) fixed the 14 `fbo.render.recreate_colorbuffer` cases: a color-only clear kept the application's depth test (Mesa patch 0036). It also shows 9 `GL_OUT_OF_MEMORY` cases because the Xfce session was still running and holding GPU pool memory; 8 pass on a rerun without it (`gl-ready.sh` now stops the session). Counting those, 17,038 of 17,075 executed cases pass (99.8%).
 
+full12 (`results/full12-report.txt`, 27 October, with Mesa built for desktop GL and GLX as well): 99.8% (17,039 of 17,075), 9 fixed against full10 (the out-of-memory cases), none regressed, no hangs.
+
 What still failed in full9 (50 cases; the first row is fixed in full10):
 
 | cases | what | notes |

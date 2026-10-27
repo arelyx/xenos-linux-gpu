@@ -82,8 +82,8 @@ Base: Mesa main at `ab1502f` (October 2026). Apply `mesa/patches/*.patch` with `
 ```
 meson setup build-mesa src/mesa --cross-file mesa/mesa-ppc64-cross.ini \
   -Dbuildtype=release -Db_ndebug=true -Dprefix=/opt/mesa-xenos -Dgallium-drivers=freedreno \
-  -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dplatforms=x11 -Dglx=disabled -Degl=enabled \
-  -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=false -Dllvm=disabled \
+  -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dplatforms=x11 -Dglx=dri -Degl=enabled \
+  -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true -Dllvm=disabled \
   -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=enabled -Dtools=drm-shim -Dglvnd=disabled
 ninja -C build-mesa && DESTDIR=/srv/nfs/xenon ninja -C build-mesa install
 ```
