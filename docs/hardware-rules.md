@@ -163,6 +163,11 @@ One bit per parameter. All set (what we wrote since bring-up) interpolates every
 
 `gl_FragDepth` is an ALU export to register 61, depth in x, in the same pixel export allocation as the colors (Xenia's `ucode.h` calls it `kPSDepth`). `SQ_PROGRAM_CNTL.PS_EXPORT_MODE` has to say so: 3 instead of the 2 used for one color. With 2 the export is silently dropped and the interpolated depth is written. That fits R600's `SQ_PGM_EXPORTS_PS` layout (color count << 1 | Z). Measured with `gltest/glfragdepth.c`.
 
+
+### 32. User clip planes and 3D textures
+
+Xenos has six user clip planes like R300: enable bits 0-5 of `PA_CL_CLIP_CNTL`, planes in `PA_CL_UCP_0_X`.. at 0x2388 (four floats each), tested against the clip-space position. 3D textures sample correctly from the linear layout Xenia documents (256-byte rows, slices padded to 32 rows, depth padded to 4, the level to 4 KB); the fetch constant's size dword is 11/11/10 bits for 3D, and the fetch instruction needs all three coordinate components live. Measured with `gltest/gl3d.c`.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

@@ -1,0 +1,228 @@
+From 9c91db1e70cd1a61ec630c5a5a69fe5a6cc62f12 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 11:38:30 -0700
+Subject: [PATCH] freedreno/xenos: user clip planes and 3D textures
+
+- PA_CL_CLIP_CNTL bits 0-5 enable the R300-style user clip planes and
+  PA_CL_UCP_n (0x2388, four floats each) hold them, in clip space. That is
+  what st passes without a GLSL vertex shader (fixed function, ARB vertex
+  programs); gl_ClipVertex is still unhandled.
+- 3D textures: linear layout as Xenia describes it (256-byte rows, slices
+  of 32-row-aligned height, depth padded to 4, mips sized from the next
+  power of two), DIMENSION_3D with the 11/11/10-bit size encoding, volume
+  filters in dword 4, and a three-component fetch coordinate in ir2 (the
+  third component was dropped from the register allocation, so a coordinate
+  built in the shader lost r). Max 3D levels 11.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 13 ++++++++++++
+ .../drivers/freedreno/a2xx/fd2_rasterizer.c   |  5 ++++-
+ .../drivers/freedreno/a2xx/fd2_resource.c     | 20 +++++++++++++++++++
+ .../drivers/freedreno/a2xx/fd2_texture.c      | 10 +++++++++-
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  |  2 ++
+ .../drivers/freedreno/a2xx/ir2_private.h      |  3 ++-
+ .../drivers/freedreno/freedreno_resource.c    |  2 +-
+ .../drivers/freedreno/freedreno_screen.c      |  3 ++-
+ 8 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 37f6d64..0f79180 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -167,6 +167,10 @@ emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+       tex2 = (tex2 & ~(A2XX_SQ_TEX_2_WIDTH__MASK | A2XX_SQ_TEX_2_HEIGHT__MASK)) |
+              A2XX_SQ_TEX_2_WIDTH(u_minify(prsc->width0, base_level) - 1) |
+              A2XX_SQ_TEX_2_HEIGHT(u_minify(prsc->height0, base_level) - 1);
++      if (prsc->target == PIPE_TEXTURE_3D)   /* 11/11/10-bit sizes */
++         tex2 = (u_minify(prsc->width0, base_level) - 1) |
++                (u_minify(prsc->height0, base_level) - 1) << 11 |
++                (u_minify(prsc->depth0, base_level) - 1) << 22;
+    }
+    OUT_RING(ring, sampler->tex0 | tex0);
+    if (rsc)
+@@ -334,6 +338,15 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       OUT_RING(ring, zsa->rb_alpha_ref);
+    }
+ 
++   /* user clip planes: PA_CL_UCP_0_X.. (0x2388, 4 floats each) */
++   if (fd2_xenos && (dirty & FD_DIRTY_UCP)) {
++      OUT_PKT3(ring, CP_SET_CONSTANT, 1 + 6 * 4);
++      OUT_RING(ring, CP_REG(0x2388));
++      for (unsigned i = 0; i < 6; i++)
++         for (unsigned j = 0; j < 4; j++)
++            OUT_RING(ring, fui(ctx->ucp.ucp[i][j]));
++   }
++
+    if (ctx->rasterizer && dirty & FD_DIRTY_RASTERIZER) {
+       struct fd2_rasterizer_stateobj *rasterizer =
+          fd2_rasterizer_stateobj(ctx->rasterizer);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c b/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
+index 0acd37e..35917ad 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
+@@ -11,6 +11,7 @@
+ #include "util/u_string.h"
+ 
+ #include "fd2_context.h"
++#include "fd2_emit.h"
+ #include "fd2_rasterizer.h"
+ #include "fd2_util.h"
+ 
+@@ -42,7 +43,9 @@ fd2_rasterizer_state_create(struct pipe_context *pctx,
+               A2XX_PA_SC_LINE_STIPPLE_REPEAT_COUNT(cso->line_stipple_factor)
+          : 0;
+ 
+-   so->pa_cl_clip_cntl = 0; // TODO
++   /* Xenos has R300-style user clip planes (PA_CL_UCP_n, Xenia registers.h),
++    * in clip space: what st passes when no GLSL vertex shader is bound */
++   so->pa_cl_clip_cntl = fd2_xenos ? (cso->clip_plane_enable & 0x3f) : 0;
+ 
+    so->pa_su_vtx_cntl =
+       A2XX_PA_SU_VTX_CNTL_PIX_CENTER(cso->half_pixel_center ? PIXCENTER_OGL
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+index 600c793..56d5607 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+@@ -25,6 +25,23 @@ fd2_layout_resource(struct fd_resource *rsc, enum fd_layout_type type)
+    /* 32 pixel alignment */
+    fdl_set_pitchalign(&rsc->layout, fdl_cpp_shift(&rsc->layout) + 5);
+ 
++   /* Xenos 3D textures are linear (fd2_tile_mode): rows 256-byte aligned,
++    * slices of 32-row-aligned height, each level's depth padded to 4 slices
++    * and the level to 4K; mips are sized from the next power of two (Xenia
++    * texture_util GetGuestTextureLayout). */
++   if (is_xenos(fd_screen(prsc->screen)) && prsc->target == PIPE_TEXTURE_3D) {
++      fdl_set_pitchalign(&rsc->layout, MAX2(fdl_cpp_shift(&rsc->layout) + 5, 8));
++      for (level = 0; level <= prsc->last_level; level++) {
++         struct fdl_slice *slice = fd_resource_slice(rsc, level);
++         uint32_t rows = level ? MAX2(util_next_power_of_two(height0) >> level, 1) : height0;
++         uint32_t depth = level ? MAX2(util_next_power_of_two(prsc->depth0) >> level, 1) : prsc->depth0;
++         slice->offset = size;
++         slice->size0 = fdl2_pitch(&rsc->layout, level) * align(rows, 32);
++         size += align(slice->size0 * align(depth, 4), 4096);
++      }
++      return size;
++   }
++
+    for (level = 0; level <= prsc->last_level; level++) {
+       struct fdl_slice *slice = fd_resource_slice(rsc, level);
+       uint32_t pitch = fdl2_pitch(&rsc->layout, level);
+@@ -51,6 +68,9 @@ fd2_tile_mode(const struct pipe_resource *tmpl)
+     */
+    if (tmpl->target == PIPE_TEXTURE_CUBE && !fd2_xenos)
+       return 0;
++   /* Xenos: 3D textures are linear (their tiled layout isn't implemented) */
++   if (tmpl->target == PIPE_TEXTURE_3D && fd2_xenos)
++      return 0;
+    /* Xenos: cube faces are (de)tiled on the CPU like 2D textures, and the
+     * linear layout's mip pitches didn't match what the sampler reads (POT
+     * cubes with mipmaps failed in dEQP) */
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+index cf4cf0e..d783bc4 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+@@ -102,6 +102,11 @@ fd2_sampler_state_create(struct pipe_context *pctx,
+    so->tex4 = 0;
+    if (cso->min_mip_filter != PIPE_TEX_MIPFILTER_NONE)
+       so->tex4 = A2XX_SQ_TEX_4_LOD_BIAS(cso->lod_bias);
++   /* Xenos: filtering between 3D slices (dword 4 bits 0/1, Xenia
++    * vol_mag_filter/vol_min_filter: 0 point, 1 linear) */
++   if (fd2_xenos)
++      so->tex4 |= (cso->mag_img_filter == PIPE_TEX_FILTER_LINEAR ? 1 : 0) |
++                  (cso->min_img_filter == PIPE_TEX_FILTER_LINEAR ? 2 : 0);
+ 
+    return so;
+ }
+@@ -146,7 +151,7 @@ tex_dimension(unsigned target)
+    case PIPE_TEXTURE_2D:
+       return SQ_TEX_DIMENSION_2D;
+    case PIPE_TEXTURE_3D:
+-      assert(0); /* TODO */
++      assert(fd2_xenos); /* TODO on Adreno */
+       return SQ_TEX_DIMENSION_3D;
+    case PIPE_TEXTURE_CUBE:
+       return SQ_TEX_DIMENSION_CUBE;
+@@ -196,6 +201,9 @@ fd2_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
+    so->tex2 = A2XX_SQ_TEX_2_HEIGHT(prsc->height0 - 1) |
+               A2XX_SQ_TEX_2_WIDTH(prsc->width0 - 1) |
+               COND(prsc->target == PIPE_TEXTURE_CUBE, A2XX_SQ_TEX_2_DEPTH(6));
++   /* 3D sizes are 11/11/10 bits (Xenia xe_gpu_texture_fetch_t size_3d) */
++   if (prsc->target == PIPE_TEXTURE_3D)
++      so->tex2 = (prsc->width0 - 1) | (prsc->height0 - 1) << 11 | (prsc->depth0 - 1) << 22;
+    so->tex3 = A2XX_SQ_TEX_3_NUM_FORMAT(fmt.num_format) |
+               fd2_tex_swiz(cso->format, cso->swizzle_r, cso->swizzle_g,
+                            cso->swizzle_b, cso->swizzle_a) |
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 19232a0..208c4a7 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -842,6 +842,7 @@ emit_tex(struct ir2_context *ctx, nir_tex_instr *tex)
+    }
+ 
+    bool is_1d = false;
++   bool is_3d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
+    switch (tex->sampler_dim) {
+    case GLSL_SAMPLER_DIM_2D:
+    case GLSL_SAMPLER_DIM_EXTERNAL:
+@@ -897,6 +898,7 @@ emit_tex(struct ir2_context *ctx, nir_tex_instr *tex)
+    instr->src[0] = src_coord;
+    instr->src[0].swizzle = is_cube ? IR2_SWIZZLE_YXW : is_1d ? IR2_SWIZZLE_XXXX : 0;
+    instr->fetch.tex.is_cube = is_cube;
++   instr->fetch.tex.is_3d = is_3d;
+    instr->fetch.tex.is_rect = is_rect;
+    instr->fetch.tex.samp_id = tex->sampler_index;
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index afa1f02..34e2897 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -97,6 +97,7 @@ struct ir2_instr {
+                bool is_cube : 1;
+                bool grad_y : 1;   /* TEX_GET_GRADIENTS: keep d/dy (.y) instead of d/dx */
+                bool is_rect : 1;
++               bool is_3d : 1;   /* three coordinates */
+                uint8_t samp_id;
+             } tex;
+          };
+@@ -373,7 +374,7 @@ src_ncomp(struct ir2_instr *instr)
+       case VTX_FETCH:
+          return 1;
+       case TEX_FETCH:
+-         return instr->fetch.tex.is_cube ? 3 : 2;
++         return instr->fetch.tex.is_cube || instr->fetch.tex.is_3d ? 3 : 2;
+       case TEX_SET_TEX_LOD:
+          return 1;
+       default:
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 49bd49d..9c9ad27 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1444,7 +1444,7 @@ get_best_layout(struct fd_screen *screen,
+       fprintf(stderr, "xenos layout %s %ux%u target %u bind %x usage %u\n", util_format_short_name(tmpl->format),
+               tmpl->width0, tmpl->height0, tmpl->target, tmpl->bind, tmpl->usage);
+    if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
+-       tmpl->target != PIPE_BUFFER)
++       tmpl->target != PIPE_BUFFER && tmpl->target != PIPE_TEXTURE_3D)
+       return FD_LAYOUT_TILED;
+    /* and whatever else fd2_tile_mode picked (textures, depth/stencil) */
+    if (is_xenos(screen))
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 741cb5d..9f44388 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -677,7 +677,8 @@ fd_init_screen_caps(struct fd_screen *screen)
+    caps->max_texture_cube_levels =
+       is_a6xx(screen) || is_a5xx(screen) || is_a4xx(screen) ? 15 : 14;
+ 
+-   caps->max_texture_3d_levels = is_a3xx(screen) ? 11 : 12;
++   /* Xenos: 3D sizes are 11 bits (2048) wide/high, 10 bits deep */
++   caps->max_texture_3d_levels = is_a3xx(screen) || is_xenos(screen) ? 11 : 12;
+ 
+    caps->max_texture_array_layers = is_a6xx(screen) ? 2048 :
+       (is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) ? 256 : 0);
+-- 
+2.53.0
+
