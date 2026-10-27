@@ -476,6 +476,11 @@ static struct drm_gem_dma_object *xe_pool_gem_create(struct drm_device *dev, siz
 		gen_pool_free(xe_pool, v, size);
 		return NULL;
 	}
+	/* the pool is recycled between processes: clear what the last owner left
+	 * (dma_alloc_coherent, the fallback, already returns zeroed memory;
+	 * piglit security/initialized-*) */
+	if (msm_zero_bo)
+		memset((void *)v, 0, size);
 	xo->gl_tiled = true;
 	xo->pool_size = size;
 	xo->dma.vaddr = (void *)v;

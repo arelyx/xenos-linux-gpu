@@ -59,6 +59,7 @@ make -C <kernel tree> ARCH=powerpc CROSS_COMPILE=xenon- M=$PWD/kernel/xegpu modu
 | `gpu_blit` | 1 after bring-up | GPU linear-to-tiled blit for CPU framebuffers |
 | `direct_scanout` | 1 | scan out GL (tiled) framebuffers in place |
 | `msm_pool` | 1 | GL buffers from the boot-time contiguous pool (48 MB) |
+| `msm_zero_bo` | 0 | clear pool buffers when they are allocated. The pool is recycled between processes, so without it one process can read what another left behind (piglit `security/initialized-*` warn). Costs about 12% in x11perf `-putimage500`. |
 | `msm_state_init` | 1 | run libxenon's `Xe_Init` stream before the first GL submit after a CP init |
 | `sq_gpr_pix`, `sq_gpr_vtx` | 64, 64 | shader GPR split written after the state init |
 | `fence_timeouts`, `fence_stalls`, `gpu_hung` | read-only | test harnesses check these |

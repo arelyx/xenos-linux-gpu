@@ -40,6 +40,9 @@ static bool msm_pool = true;
 static bool msm_debug;
 module_param(msm_debug, bool, 0644);
 module_param(msm_pool, bool, 0644);
+static bool msm_zero_bo;   /* off: costs 12% in x11perf -putimage500 */
+MODULE_PARM_DESC(msm_zero_bo, "Clear pool buffers on allocation; they are recycled between processes, so without it a process can read what another left (piglit security/initialized-*)");
+module_param(msm_zero_bo, bool, 0644);
 /* GEM object plus a flag: buffers made through the msm interface hold GL render
  * targets, which Mesa keeps in the Xenos tiled layout the display reads natively */
 struct xe_gem_obj {
