@@ -82,13 +82,13 @@ Base: Mesa main at `ab1502f` (October 2026). Apply `mesa/patches/*.patch` with `
 ```
 meson setup build-mesa src/mesa --cross-file mesa/mesa-ppc64-cross.ini \
   -Dbuildtype=release -Db_ndebug=true -Dprefix=/opt/mesa-xenos -Dgallium-drivers=freedreno \
-  -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dplatforms= -Dglx=disabled -Degl=enabled \
+  -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dplatforms=x11 -Dglx=disabled -Degl=enabled \
   -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=false -Dllvm=disabled \
   -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=enabled -Dtools=drm-shim -Dglvnd=disabled
 ninja -C build-mesa && DESTDIR=/srv/nfs/xenon ninja -C build-mesa install
 ```
 
-The cross file uses `-mcpu=970 -mtune=cell -mno-altivec`. Don't use `-mcpu=cell` (see footguns). On the console: `LD_LIBRARY_PATH=/opt/mesa-xenos/lib`. Useful environment: `XENOS_DEBUG=1` (layouts and maps), `XENOS_COHER=<hex>`, `XENOS_RESOLVE_<FORMAT>=<endian><swap>`, `XENOS_INTERP=<hex>` (experiment hooks), `XENOS_FLUSH_BARRIER=1` (texture barriers flush the batch, as upstream freedreno does), `XENOS_BLIT_MIN_PIXELS=<n>` (texture transfers smaller than n pixels use the CPU path), `XENOS_READ_BLIT_MIN_PIXELS=<n>` (the same for glReadPixels), `XENOS_FULL_INVAL=1` (invalidate all of DRAM before every draw, as before exact ranges), `FD_MESA_DEBUG=disasm`, `FD_RD_DUMP=enable,full FD_RD_DUMP_PATH=...`.
+`-Dplatforms=x11` gives EGL clients under X (DRI3); it needs the X and xcb development packages in the sysroot (`libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxcb-dri2-0-dev libxcb-dri3-dev libxcb-present-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-glx0-dev libxshmfence-dev libxxf86vm-dev libxrandr-dev`). The cross file uses `-mcpu=970 -mtune=cell -mno-altivec`. Don't use `-mcpu=cell` (see footguns). On the console: `LD_LIBRARY_PATH=/opt/mesa-xenos/lib`. Useful environment: `XENOS_DEBUG=1` (layouts and maps), `XENOS_COHER=<hex>`, `XENOS_RESOLVE_<FORMAT>=<endian><swap>`, `XENOS_INTERP=<hex>` (experiment hooks), `XENOS_FLUSH_BARRIER=1` (texture barriers flush the batch, as upstream freedreno does), `XENOS_BLIT_MIN_PIXELS=<n>` (texture transfers smaller than n pixels use the CPU path), `XENOS_READ_BLIT_MIN_PIXELS=<n>` (the same for glReadPixels), `XENOS_FULL_INVAL=1` (invalidate all of DRAM before every draw, as before exact ranges), `FD_MESA_DEBUG=disasm`, `FD_RD_DUMP=enable,full FD_RD_DUMP_PATH=...`.
 
 ## Xorg + glamor
 

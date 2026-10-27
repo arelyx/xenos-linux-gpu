@@ -220,17 +220,32 @@ static void xenos_enable(struct drm_simple_display_pipe *pipe,
 		int height = plane_state->fb->height;
 		int bpp = drm_format_info_bpp(plane_state->fb->format, 0);
 		int cpp = DIV_ROUND_UP(bpp, 8);
-
-		if (!IS_ERR_OR_NULL(xenos->real_framebuffer.vaddr))
-			dma_free_coherent(xenos->dev.dev, xenos->real_framebuffer.size,
-					  xenos->real_framebuffer.vaddr,
-					  xenos->real_framebuffer.dma_addr);
-
 		/* tiled surfaces are padded to 32 lines; the GPU resolve writes whole tiles */
-		xenos->real_framebuffer.size = width * ALIGN(height, 32) * cpp;
-		xenos->real_framebuffer.vaddr = dma_alloc_coherent(
-			xenos->dev.dev, xenos->real_framebuffer.size,
-			&xenos->real_framebuffer.dma_addr, GFP_KERNEL);
+		size_t size = width * ALIGN(height, 32) * cpp;
+
+		/* Keep the scanout buffer across disable/enable (every Xorg start and
+		 * stop) and reuse it when it is big enough: after hours of uptime a
+		 * fresh 3.6 MB contiguous allocation failed, the display pointed at
+		 * address 0, and the allocator's pressure took the network driver
+		 * down with it (26 Oct 2026). */
+		if (IS_ERR_OR_NULL(xenos->real_framebuffer.vaddr) || xenos->real_framebuffer.size < size) {
+			dma_addr_t dma;
+			void *v = dma_alloc_coherent(xenos->dev.dev, size, &dma, GFP_KERNEL | __GFP_NOWARN);
+
+			if (!v) {
+				drm_err(&xenos->dev, "no memory for a %dx%d scanout buffer\n", width, height);
+				if (IS_ERR_OR_NULL(xenos->real_framebuffer.vaddr))
+					return;
+			} else {
+				if (!IS_ERR_OR_NULL(xenos->real_framebuffer.vaddr))
+					dma_free_coherent(xenos->dev.dev, xenos->real_framebuffer.size,
+							  xenos->real_framebuffer.vaddr,
+							  xenos->real_framebuffer.dma_addr);
+				xenos->real_framebuffer.vaddr = v;
+				xenos->real_framebuffer.dma_addr = dma;
+				xenos->real_framebuffer.size = size;
+			}
+		}
 
 		drm_info(&xenos->dev, "Using %dx%d (%04lx) fb at %pad\n", width, height,
 			 xenos->real_framebuffer.size, &xenos->real_framebuffer.dma_addr);
@@ -246,11 +261,7 @@ static void xenos_disable(struct drm_simple_display_pipe *pipe)
 {
 	struct xenos_device *xenos = xenos_of_pipe(pipe);
 	iowrite32be(0, xenos->regs + D1GRPH_ENABLE);
-
-	dma_free_coherent(xenos->dev.dev, xenos->real_framebuffer.size,
-			  xenos->real_framebuffer.vaddr,
-			  xenos->real_framebuffer.dma_addr);
-	xenos->real_framebuffer.vaddr = NULL;
+	/* the scanout buffer is kept for the next enable (see xenos_enable) */
 }
 
 static void xenos_cpu_blit(struct iosys_map dst, const void *src_vaddr,
@@ -518,6 +529,14 @@ static void xenos_pci_remove(struct pci_dev *pdev)
 
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
+	{
+		struct xenos_device *xenos = container_of(dev, struct xenos_device, dev);
+
+		if (!IS_ERR_OR_NULL(xenos->real_framebuffer.vaddr))
+			dma_free_coherent(dev->dev, xenos->real_framebuffer.size,
+					  xenos->real_framebuffer.vaddr, xenos->real_framebuffer.dma_addr);
+		xenos->real_framebuffer.vaddr = NULL;
+	}
 	xe_fence_retire();
 	xe_fence_flush_all();
 	blit_free(&pdev->dev);

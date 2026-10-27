@@ -1,0 +1,49 @@
+From 8990af04fde33a29433a5f2f0bb707afc0257a70 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:37:24 -0700
+Subject: [PATCH 38/38] freedreno/xenos: texture barriers flush the batch again
+ by default
+
+The in-batch barrier resolve hangs the GPU in the wait after its cache
+flush (COHER_STATUS_HOST stays busy, flags 0x03000100 over the resolved
+pixmap) when Xfce resizes a window; xorg/xresize.c reproduces it within
+a few dozen steps. Flush the batch at a barrier, as upstream freedreno
+does, until that is understood. XENOS_INBATCH_BARRIER=1 restores the
+in-batch resolve.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index 3f568b8..a2d9f17 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -27,7 +27,11 @@
+ #include "fd2_zsa.h"
+ 
+ DEBUG_GET_ONCE_BOOL_OPTION(xenos_full_resolve, "XENOS_FULL_RESOLVE", false)
+-DEBUG_GET_ONCE_BOOL_OPTION(xenos_flush_barrier, "XENOS_FLUSH_BARRIER", false)
++/* The in-batch barrier resolve hangs the GPU in its cache flush wait (COHER_STATUS_HOST
++ * stays busy) when Xfce resizes a window; until that is understood the barrier
++ * flushes the batch, as upstream freedreno does. XENOS_INBATCH_BARRIER=1 brings
++ * the in-batch resolve back (twice the 10x10 copy rate). */
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_inbatch_barrier, "XENOS_INBATCH_BARRIER", false)
+ 
+ static uint32_t
+ fmt2swap(enum pipe_format format)
+@@ -925,7 +929,7 @@ fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
+    struct fd_ringbuffer *ring;
+    unsigned rx0, ry0, rx1, ry1;
+ 
+-   if (!batch || debug_get_option_xenos_flush_barrier()) {
++   if (!batch || !debug_get_option_xenos_inbatch_barrier()) {
+       pctx->flush(pctx, NULL, 0);
+       return;
+    }
+-- 
+2.53.0
+

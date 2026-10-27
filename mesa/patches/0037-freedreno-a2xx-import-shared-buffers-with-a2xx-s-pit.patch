@@ -1,0 +1,46 @@
+From c291462b7f77f7f80cd3258fd29545a6de85af10 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:37:24 -0700
+Subject: [PATCH 37/38] freedreno/a2xx: import shared buffers with a2xx's pitch
+ alignment
+
+fd_layout_resource_for_handle() aligned the pitch to gmem_align_w (128
+pixels on a2xx), but a2xx lays resources out with 32-pixel alignment, so
+it rejected buffers it had exported itself: X's DRI3 failed every
+xcb_dri3_pixmap_from_buffer and EGL clients under X had no back buffer.
+On Xenos a shared buffer is also tiled, the only layout it renders.
+With -Dplatforms=x11, glmark2-es2 now renders in an X window.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_resource.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index f612c9c..74f9ebd 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1883,6 +1883,18 @@ fd_layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *han
+    else
+       rsc->layout.pitchalign = MAX2(rsc->layout.pitchalign, 5);
+ 
++   /* a2xx lays resources out with 32-pixel pitch alignment (fd2_layout_resource),
++    * not gmem_align_w (128): its own exported buffers failed to import, so X's
++    * DRI3 rejected every client back buffer. Xenos renders and resolves only
++    * the tiled layout, so a buffer it shares is tiled. */
++   if (is_a2xx(screen)) {
++      rsc->layout.pitchalign = fdl_cpp_shift(&rsc->layout) + 5;
++      if (is_xenos(screen)) {
++         rsc->layout.tile_mode = 1;
++         slice->size0 = align(handle->stride * align(prsc->height0, 32), 4096);
++      }
++   }
++
+    if (rsc->layout.pitch0 < (prsc->width0 * rsc->layout.cpp) ||
+        fd_resource_pitch(rsc, 0) != rsc->layout.pitch0)
+       return false;
+-- 
+2.53.0
+

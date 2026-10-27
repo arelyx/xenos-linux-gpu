@@ -37,6 +37,9 @@ Things that cost us hours. Most are obvious in hindsight.
 
 - **"Only render targets need tiling" was wrong on Xenos.** Linear textures follow a different mip layout (hardware rule 23). Tiling everything fixed about 240 dEQP cases. Tiling staging textures as well broke window copies in `xorg/xcopytest.c` (pixmap copies stayed correct); staging stays linear, and we don't yet know why.
 
+- **Benchmarks and conformance didn't resize windows.** The in-batch texture barrier passed x11perf, xcopytest, a 7-minute Xfce soak and the full dEQP run, then hung the GPU the first time someone dragged a window corner. `xorg/xresize.c` is now part of the checks.
+- **The kernel's ring-space wait doesn't count as a stall.** When the GPU stops while the ring is full, Xorg spins in the submit ioctl at 100% CPU and `fence_stalls` stays 0. Read `COHER_STATUS_HOST` (0x0a31) and `CP_RB_RPTR` with `xereg` to see where it stopped.
+
 ## Process
 
 - **`pkill -f <pattern>` matches the shell that runs it** when the pattern appears in the command line. We killed our own SSH session and our own harness this way. Match exact process names (`pkill -x xbox-cycle`) or check `/proc/<pid>/cmdline`.

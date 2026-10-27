@@ -1,6 +1,7 @@
 [Unit]
 Description=Xfce desktop on tty1 with glamor (GPU-accelerated X on Xenos)
 After=multi-user.target systemd-user-sessions.service xegpu.service
+Wants=xegpu.service
 Conflicts=getty@tty1.service xfce-tty1.service
 
 [Service]
@@ -12,4 +13,8 @@ StandardInput=tty
 StandardOutput=journal
 RuntimeDirectory=xfce
 RuntimeDirectoryMode=0700
-Environment=HOME=/root XDG_RUNTIME_DIR=/run/xfce PIXMAN_DISABLE=vmx LD_LIBRARY_PATH=/opt/mesa-xenos/lib
+# LD_LIBRARY_PATH also gives GL clients in the session (EGL on X11 through DRI3) the Xenos Mesa
+Environment=HOME=/root XDG_RUNTIME_DIR=/run/xfce PIXMAN_DISABLE=vmx LD_LIBRARY_PATH=/opt/mesa-xenos/lib GL_READY_KEEP_SESSION=1
+
+[Install]
+WantedBy=graphical.target

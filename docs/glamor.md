@@ -16,6 +16,10 @@ Xorg's modesetting driver uses glamor for acceleration: every X drawing operatio
 
 Result: xclock, xeyes (Shape), xlogo and xterm (Xft text) render correctly, with depth 24/32 accelerated, no fence timeouts or stalls, and the front buffer scanned out in place (`direct_scanout`: the GPU's tiled layout is what the display reads, so no copy). `docs/images/glamor-scanout-2026-10-26.png` is the scanout buffer read back from memory; `glamor-xwd-2026-10-26.png` is X's own view.
 
+## GL applications under X
+
+EGL/GLES2 clients render on the GPU in X windows through DRI3: the client allocates its back buffer, exports it as a dma-buf, and glamor imports it. Two things were missing. Mesa had been built without the X11 platform (`-Dplatforms=x11` now). And freedreno couldn't import its own a2xx buffers: the import path assumed a pitch alignment of `gmem_align_w` (128 pixels) where a2xx uses 32, so every `xcb_dri3_pixmap_from_buffer` failed with BadAlloc and the client crashed without a back buffer. On Xenos an imported buffer is also tiled, since that is the only layout it renders. `gltest/glprime.c` exercises the export/import on its own. glmark2-es2 in an 800x600 window: build 1020 FPS, texture 1016, jellyfish 680 (`docs/images/glmark2-x11-jellyfish-2026-10-26.png`). Clients need `LD_LIBRARY_PATH=/opt/mesa-xenos/lib`; the xfce-glamor unit sets it for the session. There is no GLX: Mesa is GLES-only, so desktop-GL programs still get the system's software renderer.
+
 ## Running it
 
 ```
