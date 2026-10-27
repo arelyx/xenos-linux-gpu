@@ -4,7 +4,7 @@
 P=/sys/module/xegpu/parameters
 opts=${1:-msm_compat=1}
 # a desktop session holds GL buffers from the GPU pool (big textures then fail with GL_OUT_OF_MEMORY)
-[ -n "$GL_READY_KEEP_SESSION" ] || { systemctl stop xfce-glamor 2>/dev/null; pkill -x Xorg; }   # xfce-glamor itself sets GL_READY_KEEP_SESSION
+[ -n "$GL_READY_KEEP_SESSION" ] || { systemctl stop xfce-glamor icewm-glamor 2>/dev/null; pkill -x Xorg; }   # the desktop units set GL_READY_KEEP_SESSION
 if [ "$(cat $P/gpu_hung 2>/dev/null)" = Y ] || [ "$(cat $P/fence_timeouts 2>/dev/null || echo 1)" != 0 ] || [ "$(cat $P/fence_stalls 2>/dev/null || echo 0)" != 0 ]; then echo hung; exit; fi
 if [ "$(cat $P/msm_compat)" != 1 ] || [ -n "$RELOAD" ]; then
   systemctl stop xfce-tty1 2>/dev/null; pkill -9 -x Xorg; sleep 2

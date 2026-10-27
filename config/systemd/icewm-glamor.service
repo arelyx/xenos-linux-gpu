@@ -1,0 +1,20 @@
+[Unit]
+Description=IceWM desktop on tty1 with glamor (GPU-accelerated X on Xenos)
+After=multi-user.target systemd-user-sessions.service xegpu.service
+Wants=xegpu.service
+Conflicts=getty@tty1.service xfce-tty1.service xfce-glamor.service
+
+[Service]
+ExecStartPre=/opt/deqp/gl-ready.sh
+ExecStartPre=/bin/sh -c 'echo 0 > /sys/module/xegpu/parameters/gpu_blit'
+ExecStart=/usr/bin/xinit /usr/bin/icewm-session -- /usr/bin/Xorg :0 vt1 -nolisten tcp -keeptty -configdir /etc/X11/glamor-test -modulepath /opt/xegpu-xorg/modules,/usr/lib/xorg/modules -logfile /tmp/Xicewm.log
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+RuntimeDirectory=icewm
+RuntimeDirectoryMode=0700
+# LD_LIBRARY_PATH also gives GL clients in the session (EGL on X11 through DRI3) the Xenos Mesa
+Environment=HOME=/root XDG_RUNTIME_DIR=/run/icewm PIXMAN_DISABLE=vmx LD_LIBRARY_PATH=/opt/mesa-xenos/lib GL_READY_KEEP_SESSION=1
+
+[Install]
+WantedBy=graphical.target

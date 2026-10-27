@@ -35,5 +35,5 @@ LD_LIBRARY_PATH=/opt/mesa-xenos/lib PIXMAN_DISABLE=vmx \
 ## Open
 
 - Performance: see [performance.md](performance.md). Restores and resolves now cover only each batch's scissor bounds.
-- A full Xfce session runs on glamor (`config/systemd/xfce-glamor.service`; `docs/images/xfce-glamor-scanout-2026-10-26.png` is its scanout), but hasn't been used for long sessions yet.
+- A full Xfce session runs on glamor (`config/systemd/xfce-glamor.service`; `docs/images/xfce-glamor-scanout-2026-10-26.png` is its scanout), but 458 MB of RAM is too little for it in practice: with a terminal and an `apt install` it filled RAM and swap and the console stopped answering. xfwm4 alone loads the system llvmpipe and LLVM for its GLX vsync (`xfconf-query -c xfwm4 -p /general/vblank_mode -s off` avoids that). The default desktop is now IceWM (`config/systemd/icewm-glamor.service`): about 160 MB available and no swap in use after boot.
 - glamor still falls back to software for depth 8, 15 and 16.
