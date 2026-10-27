@@ -83,3 +83,5 @@ Fourth pass (gl20-4, with Mesa 0046's first version, which also converted CPU wr
 
 Fifth pass (gl20-5, after Mesa 0047 LOD clamps/base level): 824 pass, **72.3%** of executed, no hangs. Mesa 0048 then fixes flat shading and the base vertex (seven more tests pass alone); gl20-6 measures it.
 
+Sixth pass (gl20-6, with the fixed 0048): 836 pass, **73.4%** of executed, no hangs; 13 fixed, one regressed (`arb_draw_elements_base_vertex-bounds`: the index bounds must include the base vertex, Mesa 0049, passes now). Texture wrap with linear filtering is off by a few values near texel edges (`texwrap`); not understood.
+

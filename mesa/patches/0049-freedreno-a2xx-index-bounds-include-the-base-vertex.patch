@@ -1,0 +1,37 @@
+From cc68297de2ec86b3504cb550de7a33e93cc309d3 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:40:53 -0700
+Subject: [PATCH] freedreno/a2xx: index bounds include the base vertex
+
+VGT_MIN/MAX_VTX_INDX bound indices after VGT_INDX_OFFSET is added, so with
+a base vertex they need it too (piglit arb_draw_elements_base_vertex-bounds
+after the base vertex went into VGT_INDX_OFFSET).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 5a2d3ea..e83a2aa 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -146,9 +146,11 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+ 
+       OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
+-      OUT_RING(ring, info->index_bounds_valid ? info->max_index
++      /* the bounds apply after VGT_INDX_OFFSET (the base vertex) is added */
++      int bias = info->index_size ? draw->index_bias : 0;
++      OUT_RING(ring, info->index_bounds_valid ? info->max_index + bias
+                                               : ~0); /* VGT_MAX_VTX_INDX */
+-      OUT_RING(ring, info->index_bounds_valid ? info->min_index
++      OUT_RING(ring, info->index_bounds_valid ? info->min_index + bias
+                                               : 0); /* VGT_MIN_VTX_INDX */
+    }
+ 
+-- 
+2.53.0
+
