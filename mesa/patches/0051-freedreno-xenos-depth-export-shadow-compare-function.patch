@@ -1,0 +1,336 @@
+From bbb8eff323aa6223680d490ac3499f51b80b7c5c Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 10:45:30 -0700
+Subject: [PATCH] freedreno/xenos: depth export, shadow compare functions,
+ tiled uploads
+
+- Fragment shaders can write gl_FragDepth: export 61 (x), and
+  SQ_PROGRAM_CNTL.PS_EXPORT_MODE gets bit 0 (3 instead of 2); with mode 2
+  the export is ignored. Early Z is off for such shaders. cp_export leaves
+  the depth export's mov alone (redirecting gl_FragCoord.z into it left
+  the scheduler with nothing to issue).
+- Shadow samplers honour GL_TEXTURE_COMPARE_FUNC: the compare function is
+  a per-sampler fragment constant (IR2_SHADOW_CONST + sampler) holding
+  less/equal/greater weights.
+- Rectangle, 1D and depth/stencil resources are tiled, so CPU uploads of
+  depth go through the conversion to the resolve's layout; the layout
+  choice for Xenos follows fd2_tile_mode.
+- Unsynchronized maps of tiled resources take the CPU (de)tiling path too.
+  A fresh texture got UNSYNCHRONIZED from improve_transfer_map_usage and
+  its data went in linear (glDrawPixels came out in 4-texel blocks).
+- Depth conversion on the CPU only for the Z24 formats, not Z32_FLOAT.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 15 +++++++-
+ .../drivers/freedreno/a2xx/fd2_program.c      | 25 ++++++++++++-
+ .../drivers/freedreno/a2xx/fd2_program.h      |  2 ++
+ .../drivers/freedreno/a2xx/fd2_resource.c     |  7 ++--
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  4 +++
+ src/gallium/drivers/freedreno/a2xx/ir2_cp.c   |  5 +++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 36 ++++++++++++-------
+ .../drivers/freedreno/a2xx/ir2_private.h      |  3 +-
+ .../drivers/freedreno/freedreno_resource.c    | 23 +++++++-----
+ 9 files changed, 95 insertions(+), 25 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 1bd69b8..37f6d64 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -318,7 +318,7 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       struct pipe_stencil_ref *sr = &ctx->stencil_ref;
+       uint32_t val = zsa->rb_depthcontrol;
+ 
+-      if (fs->has_kill)
++      if (fs->has_kill || fs->writes_depth)
+          val &= ~A2XX_RB_DEPTHCONTROL_EARLY_Z_ENABLE;
+ 
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+@@ -480,6 +480,19 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+ 
+    if (dirty & (FD_DIRTY_TEX | FD_DIRTY_PROG))
+       emit_textures(ring, ctx);
++
++   /* shadow compare functions (ir2_lower_tex_shadow) */
++   if ((dirty & (FD_DIRTY_TEX | FD_DIRTY_PROG | FD_DIRTY_CONST)) && ctx->prog.fs &&
++       ((struct fd2_shader_stateobj *)ctx->prog.fs)->shadow_samplers) {
++      struct fd_texture_stateobj *tex = &ctx->tex[MESA_SHADER_FRAGMENT];
++      u_foreach_bit (i, ((struct fd2_shader_stateobj *)ctx->prog.fs)->shadow_samplers) {
++         struct pipe_sampler_state *samp = i < tex->num_samplers ? tex->samplers[i] : NULL;
++         unsigned func = samp && samp->compare_mode ? samp->compare_func : PIPE_FUNC_LEQUAL;
++         float w[4] = {func & 1 ? 1.0f : 0.0f, func & 2 ? 1.0f : 0.0f, func & 4 ? 1.0f : 0.0f, 0.0f};
++         fd2_emit_alu_consts(ctx, ring, (PS_CONST_BASE + IR2_SHADOW_CONST + i) * 4,
++                             (const uint32_t *)w, 4);
++      }
++   }
+ }
+ 
+ /* emit per-context initialization:
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index fc4db7d..2e317c0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -27,6 +27,8 @@
+ #include "fd2_util.h"
+ #include "ir2.h"
+ 
++static unsigned xenos_ps_export_mode(struct fd2_shader_stateobj *fp);
++
+ DEBUG_GET_ONCE_OPTION(fd2_dump_shaders, "FD2_DUMP_SHADERS", NULL)
+ DEBUG_GET_ONCE_BOOL_OPTION(fd2_debug_fetch, "FD2_DEBUG_FETCH", false)
+ 
+@@ -126,6 +128,11 @@ fd2_shader_state_create(struct pipe_context *pctx,
+    nir_foreach_function_impl (impl, so->nir) {
+       nir_foreach_block (block, impl) {
+          nir_foreach_instr (instr, block) {
++            if (instr->type == nir_instr_type_intrinsic &&
++                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_uniform &&
++                nir_intrinsic_base(nir_instr_as_intrinsic(instr)) >= IR2_SHADOW_CONST)
++               so->shadow_samplers |=
++                  BITFIELD_BIT(nir_intrinsic_base(nir_instr_as_intrinsic(instr)) - IR2_SHADOW_CONST);
+             if (instr->type != nir_instr_type_tex)
+                continue;
+ 
+@@ -314,7 +321,7 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_PROGRAM_CNTL));
+    OUT_RING(ring,
+-            A2XX_SQ_PROGRAM_CNTL_PS_EXPORT_MODE(2) |
++            A2XX_SQ_PROGRAM_CNTL_PS_EXPORT_MODE(xenos_ps_export_mode(fp)) |
+                A2XX_SQ_PROGRAM_CNTL_VS_EXPORT_MODE(mode) |
+                A2XX_SQ_PROGRAM_CNTL_VS_RESOURCE |
+                A2XX_SQ_PROGRAM_CNTL_PS_RESOURCE |
+@@ -325,6 +332,22 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+                COND(!fp, A2XX_SQ_PROGRAM_CNTL_GEN_INDEX_VTX));
+ }
+ 
++/* PS_EXPORT_MODE: 2 for one color export. With a depth export Xenos wants
++ * bit 0 set as well (as in R600's SQ_PGM_EXPORTS_PS: color count << 1 | Z);
++ * XENOS_PS_EXPORT_MODE overrides for experiments. */
++static unsigned
++xenos_ps_export_mode(struct fd2_shader_stateobj *fp)
++{
++   static int override = -2;
++   if (override == -2) {
++      const char *e = getenv("XENOS_PS_EXPORT_MODE");
++      override = e ? atoi(e) : -1;
++   }
++   if (override >= 0)
++      return override;
++   return fp && fp->writes_depth ? 3 : 2;
++}
++
+ void
+ fd2_prog_init(struct pipe_context *pctx)
+ {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index f0976b0..6903466 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -35,7 +35,9 @@ struct fd2_shader_stateobj {
+    bool writes_psize;
+    bool need_param;
+    bool has_kill;
++   bool writes_depth;   /* fragment shader exports depth (oDepth, export 61) */
+    uint16_t tex_lod_samplers;
++   uint16_t shadow_samplers;   /* read IR2_SHADOW_CONST + sampler */
+ 
+    /* note:
+     * fragment shader only has one variant
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+index f6933c3..600c793 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+@@ -56,10 +56,13 @@ fd2_tile_mode(const struct pipe_resource *tmpl)
+     * cubes with mipmaps failed in dEQP) */
+    /* Xenos: textures too. Its linear layout aligns mip rows to 256 bytes
+     * (Xenia texture_util), unlike this one; the tiled layout matches. */
++   /* Rectangle textures too: depth ones are converted to the resolve's layout
++    * only on the tiled path (freedreno_resource.c xenos_tile_copy). */
+    if (fd2_xenos && (tmpl->bind & PIPE_BIND_SAMPLER_VIEW) && tmpl->usage != PIPE_USAGE_STAGING &&
+-       (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE) &&
++       (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE ||
++        tmpl->target == PIPE_TEXTURE_RECT || tmpl->target == PIPE_TEXTURE_1D) &&
+        !util_format_is_compressed(tmpl->format))
+       return 1;
+    /* we can enable tiling for any resource we can render to */
+-   return (tmpl->bind & PIPE_BIND_RENDER_TARGET) ? 1 : 0;
++   return (tmpl->bind & (PIPE_BIND_RENDER_TARGET | (fd2_xenos ? PIPE_BIND_DEPTH_STENCIL : 0))) ? 1 : 0;
+ }
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index 2508226..250d443 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -49,6 +49,10 @@ struct ir2_shader_info {
+ /* marks an inputs[] entry that no varying was assigned to */
+ #define IR2_INPUT_SLOT_UNUSED 0xff
+ 
++/* fragment shader constant per sampler holding the shadow compare function
++ * as (less, equal, greater, 0) weights, emitted by fd2_emit.c */
++#define IR2_SHADOW_CONST 200
++
+ struct ir2_frag_linkage {
+    unsigned inputs_count;
+    struct {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+index 735cc71..ff2fc3e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+@@ -100,6 +100,11 @@ cp_export(struct ir2_context *ctx)
+       if (!is_mov(instr))
+          continue;
+ 
++      /* Xenos depth export: keep the mov (redirecting the fragcoord.z chain
++       * into it left the scheduler with nothing it could issue) */
++      if (instr->alu.export == 61)
++         continue;
++
+       src = &instr->src[0];
+ 
+       if (src->negate || src->abs) /* TODO handle these cases */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 7536909..19232a0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -103,10 +103,10 @@ ir2_optimize_loop(nir_shader *s)
+ bool ir3_nir_apply_trig_workarounds(nir_shader *shader);
+ 
+ /* Shadow samplers (GL 1.4 depth compare, GLSL shadow2D): a2xx has no compare in
+- * the texture unit, so fetch the depth and compare in the shader. Only the
+- * default GL_LEQUAL compare function is implemented (the result is
+- * ref <= depth); desktop GL needs shadow samplers, and before this ir2 aborted
+- * on them. */
++ * the texture unit, so fetch the depth and compare in the shader. In fragment
++ * shaders the compare function comes from the sampler through a constant
++ * (IR2_SHADOW_CONST + sampler: 1.0 in x/y/z where ref < / == / > depth
++ * passes); vertex shaders only do GL_LEQUAL (ref <= depth). */
+ static bool
+ ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
+ {
+@@ -122,7 +122,16 @@ ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
+    bool scalar = tex->def.num_components == 1;   /* new-style shadow result */
+    tex->def.num_components = 4;
+    b->cursor = nir_after_instr(&tex->instr);
+-   nir_def *r = nir_b2f32(b, nir_fge(b, nir_channel(b, &tex->def, 0), ref));
++   nir_def *d = nir_channel(b, &tex->def, 0), *r;
++   if (b->shader->info.stage == MESA_SHADER_FRAGMENT) {
++      nir_def *w = nir_load_uniform(b, 4, 32, nir_imm_int(b, 0),
++                                    .base = IR2_SHADOW_CONST + tex->sampler_index);
++      r = nir_fadd(b, nir_fmul(b, nir_channel(b, w, 0), nir_b2f32(b, nir_flt(b, ref, d))),
++                   nir_fadd(b, nir_fmul(b, nir_channel(b, w, 1), nir_b2f32(b, nir_feq(b, ref, d))),
++                            nir_fmul(b, nir_channel(b, w, 2), nir_b2f32(b, nir_flt(b, d, ref)))));
++   } else {
++      r = nir_b2f32(b, nir_fge(b, d, ref));
++   }
+    nir_def *res = scalar ? r : nir_vec4(b, r, r, r, nir_imm_float(b, 1.0f));
+    nir_def_rewrite_uses_after(&tex->def, res);
+    return true;
+@@ -209,11 +218,6 @@ ir2_optimize_nir(nir_shader *s, bool lower)
+    OPT_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
+    OPT_V(s, nir_opt_sink, nir_move_const_undef);
+ 
+-   /* TODO we dont want to get shaders writing to depth for depth textures */
+-   if (s->info.stage == MESA_SHADER_FRAGMENT &&
+-       (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)))
+-      return -1;
+-
+    return 0;
+ }
+ 
+@@ -672,8 +676,16 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
+          if (idx == ctx->f->inputs_count)
+             return;
+       }
++   } else if (slot == FRAG_RESULT_DEPTH) {
++      /* oDepth: export 61, depth in x (Xenia ucode.h) */
++      ctx->so->writes_depth = true;
++      idx = 61;
++      wrmask &= 1;
++      comp = 0;
++      if (!wrmask)
++         return;
+    } else if (slot != FRAG_RESULT_COLOR && slot != FRAG_RESULT_DATA0) {
+-      /* only color output is implemented */
++      /* only color and depth outputs are implemented */
+       return;
+    }
+ 
+@@ -691,7 +703,7 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
+    swiz_merge_p(&instr->src[0].swizzle, swiz);
+    instr->alu.write_mask = wrmask << comp;
+    instr->alu.export = idx;
+-   if (ctx->so->type == MESA_SHADER_FRAGMENT)
++   if (ctx->so->type == MESA_SHADER_FRAGMENT && idx != 61)
+       ctx->color_exported = true;
+    else if (idx < 32)
+       ctx->params_exported |= 1u << idx;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 1a7293d..afa1f02 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -289,7 +289,8 @@ is_export(struct ir2_instr *instr)
+ static inline instr_alloc_type_t
+ export_buf(unsigned num)
+ {
+-   return num < 32 ? SQ_PARAMETER_PIXEL : num >= 62 ? SQ_POSITION : SQ_MEMORY;
++   /* 61 is the pixel shader's depth export */
++   return num < 32 || num == 61 ? SQ_PARAMETER_PIXEL : num >= 62 ? SQ_POSITION : SQ_MEMORY;
+ }
+ 
+ /* component c for channel i */
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 26a8f5f..49bd49d 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -828,7 +828,9 @@ xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *
+ 
+    /* Depth/stencil in memory is the hardware's D24S8 byte-swapped (hardware
+     * rule 28, depth-path resolve): convert to and from Mesa's Z24S8. */
+-   if (util_format_is_depth_or_stencil(rsc->b.b.format) && cpp == 4 && xenos_depth_path()) {
++   enum pipe_format f = rsc->b.b.format;
++   if ((f == PIPE_FORMAT_Z24_UNORM_S8_UINT || f == PIPE_FORMAT_Z24X8_UNORM ||
++        f == PIPE_FORMAT_X24S8_UINT) && xenos_depth_path()) {
+       for (int y = 0; y < box->height; y++) {
+          for (int x = 0; x < box->width; x++) {
+             uint32_t *t = (uint32_t *)(tiled + (size_t)xenos_tiled_texel(box->x + x, box->y + y, pitch_px, cpp) * cpp);
+@@ -1173,7 +1175,14 @@ fd_resource_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+    ptrans->layer_stride = fd_resource_layer_stride(rsc, level);
+ 
+    void *ret;
+-   if (usage & PIPE_MAP_UNSYNCHRONIZED) {
++   /* Xenos: tiled resources always go through the CPU (de)tiling path, also
++    * when the map is unsynchronized (a fresh texture: improve_transfer_map_usage
++    * adds UNSYNCHRONIZED, and the data went in linear; st's glDrawPixels
++    * textures came out in 4-texel blocks) */
++   if (rsc->layout.tile_mode && is_xenos(ctx->screen) && box->depth == 1 &&
++       !(usage & TC_TRANSFER_MAP_THREADED_UNSYNC)) {
++      ret = resource_transfer_map_xenos(pctx, prsc, level, usage, box, trans);
++   } else if (usage & PIPE_MAP_UNSYNCHRONIZED) {
+       ret = resource_transfer_map_unsync(pctx, prsc, level, usage, box, trans);
+    } else {
+       ret = resource_transfer_map(pctx, prsc, level, usage, box, trans);
+@@ -1432,15 +1441,13 @@ get_best_layout(struct fd_screen *screen,
+     * be rendered to must be tiled, staging and "linear" requests included.
+     * CPU access goes through the CPU (de)tiling transfer path. */
+    if (debug_get_option_xenos_debug())
+-      fprintf(stderr, "xenos layout %s %ux%u bind %x usage %u\n", util_format_short_name(tmpl->format),
+-              tmpl->width0, tmpl->height0, tmpl->bind, tmpl->usage);
++      fprintf(stderr, "xenos layout %s %ux%u target %u bind %x usage %u\n", util_format_short_name(tmpl->format),
++              tmpl->width0, tmpl->height0, tmpl->target, tmpl->bind, tmpl->usage);
+    if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
+        tmpl->target != PIPE_BUFFER)
+       return FD_LAYOUT_TILED;
+-   /* and textures (fd2_tile_mode) */
+-   if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_SAMPLER_VIEW) && tmpl->usage != PIPE_USAGE_STAGING &&
+-       (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE) &&
+-       !util_format_is_compressed(tmpl->format))
++   /* and whatever else fd2_tile_mode picked (textures, depth/stencil) */
++   if (is_xenos(screen))
+       return FD_LAYOUT_TILED;
+ 
+    if ((tmpl->target == PIPE_BUFFER) ||
+-- 
+2.53.0
+

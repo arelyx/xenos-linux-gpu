@@ -159,6 +159,10 @@ The texture fetch opcode `TEX_GET_GRADIENTS` (18) returns d/dx and d/dy of its s
 
 One bit per parameter. All set (what we wrote since bring-up) interpolates everything; flat varyings and colors under `glShadeModel(GL_FLAT)` need their bit clear (piglit `glsl-fs-flat-color`, `clipflat`, `arb-provoking-vertex-render`).
 
+### 31. Pixel shader depth export: export 61 plus `PS_EXPORT_MODE` bit 0
+
+`gl_FragDepth` is an ALU export to register 61, depth in x, in the same pixel export allocation as the colors (Xenia's `ucode.h` calls it `kPSDepth`). `SQ_PROGRAM_CNTL.PS_EXPORT_MODE` has to say so: 3 instead of the 2 used for one color. With 2 the export is silently dropped and the interpolated depth is written. That fits R600's `SQ_PGM_EXPORTS_PS` layout (color count << 1 | Z). Measured with `gltest/glfragdepth.c`.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

@@ -1,0 +1,234 @@
+fast_color_clear@fcc-front-buffer-distraction	fail
+security@initialized-fbo	pass
+security@initialized-texmemory	warn
+security@initialized-vbo	warn
+shaders@glsl-bug-110796	fail
+shaders@glsl-bug-22603	crash(134)
+shaders@glsl-fs-fragcoord-zw-perspective	fail
+shaders@glsl-fs-pointcoord	fail
+shaders@glsl-uniform-interstage-limits@subdivide 5	crash(134)
+shaders@glsl-uniform-interstage-limits@subdivide 5, statechanges	crash(134)
+spec@!opengl 1.0@depth-clear-precision-check	fail
+spec@!opengl 1.0@gl-1.0-dlist-bitmap	pass
+spec@!opengl 1.0@gl-1.0-drawbuffer-modes	fail
+spec@!opengl 1.0@gl-1.0-drawpixels-color-index	pass
+spec@!opengl 1.0@gl-1.0-edgeflag	fail
+spec@!opengl 1.0@gl-1.0-edgeflag-quads	fail
+spec@!opengl 1.0@gl-1.0-logicop	fail
+spec@!opengl 1.0@gl-1.0-no-op-paths	fail
+spec@!opengl 1.0@gl-1.0-rastercolor	pass
+spec@!opengl 1.0@gl-1.0-scissor-bitmap	pass
+spec@!opengl 1.0@gl-1.0-swapbuffers-behavior	fail
+spec@!opengl 1.0@gl-1.0-user-clip-all-planes	fail
+spec@!opengl 1.1@copyteximage 1d	fail
+spec@!opengl 1.1@copyteximage 2d	fail
+spec@!opengl 1.1@depthstencil-default_fb-blit	fail
+spec@!opengl 1.1@depthstencil-default_fb-copypixels	fail
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8	fail
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort	fail
+spec@!opengl 1.1@draw-pixels	fail
+spec@!opengl 1.1@drawpix-z	pass
+spec@!opengl 1.1@getteximage-formats	pass
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 varray gl_triangle_fan	fail
+spec@!opengl 1.1@gl-1.1-drawarrays-vertex-count 100000 vbo gl_triangle_fan	fail
+spec@!opengl 1.1@gl-1.1-xor	fail
+spec@!opengl 1.1@gl-1.1-xor-copypixels	fail
+spec@!opengl 1.1@line-smooth-stipple	fail
+spec@!opengl 1.1@linestipple	fail
+spec@!opengl 1.1@polygon-mode	fail
+spec@!opengl 1.1@polygon-mode-offset	fail
+spec@!opengl 1.1@ppgtt_memory_alignment	crash(135)
+spec@!opengl 1.1@push-pop-color-material	fail
+spec@!opengl 1.1@read-front	fail
+spec@!opengl 1.1@read-front clear-front-first	fail
+spec@!opengl 1.1@streaming-texture-leak	timeout
+spec@!opengl 1.1@tex-upside-down-miptree	fail
+spec@!opengl 1.1@texsubimage	fail
+spec@!opengl 1.1@texsubimage-depth-formats	fail
+spec@!opengl 1.1@texsubimage-unpack	fail
+spec@!opengl 1.1@texture-al	pass
+spec@!opengl 1.1@texwrap 1d bordercolor	fail
+spec@!opengl 1.1@texwrap 1d proj bordercolor	fail
+spec@!opengl 1.1@texwrap 2d	fail
+spec@!opengl 1.1@texwrap 2d bordercolor	fail
+spec@!opengl 1.1@texwrap 2d proj	fail
+spec@!opengl 1.1@texwrap 2d proj bordercolor	fail
+spec@!opengl 1.1@texwrap formats	fail
+spec@!opengl 1.1@texwrap formats bordercolor	fail
+spec@!opengl 1.1@texwrap formats bordercolor-swizzled	fail
+spec@!opengl 1.1@user-clip	fail
+spec@!opengl 1.1@windowoverlap	crash(127)
+spec@!opengl 1.2@copyteximage 3d	fail
+spec@!opengl 1.2@getteximage-targets 3d	fail
+spec@!opengl 1.2@lodclamp-between	fail
+spec@!opengl 1.2@lodclamp-between-max	fail
+spec@!opengl 1.2@tex3d	fail
+spec@!opengl 1.2@tex3d-maxsize	fail
+spec@!opengl 1.2@texture-packed-formats	fail
+spec@!opengl 1.2@texwrap 3d	fail
+spec@!opengl 1.2@texwrap 3d bordercolor	fail
+spec@!opengl 1.2@texwrap 3d proj	fail
+spec@!opengl 1.2@texwrap 3d proj bordercolor	fail
+spec@!opengl 1.3@tex-border-1	fail
+spec@!opengl 1.3@tex3d-depth1	fail
+spec@!opengl 1.4@copy-pixels	fail
+spec@!opengl 1.4@gl-1.4-polygon-offset	fail
+spec@!opengl 1.4@gl-1.4-tex1d-2dborder	fail
+spec@!opengl 1.4@triangle-rasterization	pass
+spec@!opengl 1.4@triangle-rasterization-fbo	pass
+spec@!opengl 1.5@depth-tex-compare	fail
+spec@!opengl 2.0@early-z	pass
+spec@!opengl 2.0@gl-2.0-edgeflag	fail
+spec@!opengl 2.0@gl-2.0-edgeflag-immediate	fail
+spec@!opengl 2.0@max-samplers	fail
+spec@!opengl 2.0@max-samplers border	fail
+spec@!opengl 2.0@tex3d-npot	fail
+spec@arb_clear_texture@arb_clear_texture-3d	fail
+spec@arb_clear_texture@arb_clear_texture-depth	pass
+spec@arb_clear_texture@arb_clear_texture-depth-stencil	fail
+spec@arb_clear_texture@arb_clear_texture-sized-formats	fail
+spec@arb_color_buffer_float@gl_rgba8-drawpixels	pass
+spec@arb_depth_texture@fbo-clear-formats	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component16-blit	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component16-copypixels	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component16-drawpixels	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component24-blit	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component24-copypixels	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component24-drawpixels	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component32-blit	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component32-copypixels	pass
+spec@arb_depth_texture@fbo-depth-gl_depth_component32-drawpixels	pass
+spec@arb_depth_texture@fbo-generatemipmap-formats	pass
+spec@arb_depth_texture@texdepth	fail
+spec@arb_depth_texture@texwrap formats	fail
+spec@arb_depth_texture@texwrap formats bordercolor	fail
+spec@arb_depth_texture@texwrap formats bordercolor-swizzled	fail
+spec@arb_es2_compatibility@fbo blit from missing attachment (es2 completeness rules)	pass
+spec@arb_es2_compatibility@fbo-generatemipmap-formats	fail
+spec@arb_es2_compatibility@texwrap formats	fail
+spec@arb_es2_compatibility@texwrap formats bordercolor	fail
+spec@arb_es2_compatibility@texwrap formats bordercolor-swizzled	fail
+spec@arb_fragment_program@fp-indirections2	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit depth gl_depth24_stencil8	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit depth gl_depth_component16	pass
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit depth gl_depth_component24	pass
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit depth gl_depth_component32	pass
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit depth_stencil gl_depth24_stencil8	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit stencil gl_depth24_stencil8	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit stencil gl_stencil_index1	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit stencil gl_stencil_index16	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit stencil gl_stencil_index4	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-depth-stencil-blit stencil gl_stencil_index8	fail
+spec@arb_framebuffer_object@arb_framebuffer_object-get-attachment-parameter-default-framebuffer	fail
+spec@arb_framebuffer_object@fbo blit from missing attachment	pass
+spec@arb_framebuffer_object@fbo-blit-stretch	fail
+spec@arb_framebuffer_object@fbo-generatemipmap-3d	fail
+spec@arb_framebuffer_object@fbo-gl_pointcoord	fail
+spec@arb_framebuffer_object@fbo-mipmap-copypix	pass
+spec@arb_framebuffer_object@fbo-scissor-blit window	fail
+spec@arb_framebuffer_object@framebuffer-blit-levels draw depth	pass
+spec@arb_framebuffer_object@framebuffer-blit-levels draw stencil	fail
+spec@arb_framebuffer_object@framebuffer-blit-levels read depth	pass
+spec@arb_framebuffer_object@framebuffer-blit-levels read stencil	fail
+spec@arb_internalformat_query2@all internalformat_<x>_size pname checks	fail
+spec@arb_internalformat_query2@all internalformat_<x>_type pname checks	fail
+spec@arb_internalformat_query2@api error checks	fail
+spec@arb_internalformat_query2@individual most generic pname checks	fail
+spec@arb_internalformat_query2@max dimensions related pname checks	fail
+spec@arb_occlusion_query@occlusion_query_conform	fail
+spec@arb_pixel_buffer_object@fbo-pbo-readpixels-small	fail
+spec@arb_pixel_buffer_object@pbo-drawpixels	pass
+spec@arb_pixel_buffer_object@texsubimage pbo	fail
+spec@arb_pixel_buffer_object@texsubimage-depth-formats pbo	fail
+spec@arb_pixel_buffer_object@texsubimage-unpack pbo	fail
+spec@arb_point_sprite@arb_point_sprite-checkerboard	fail
+spec@arb_point_sprite@arb_point_sprite-mipmap	fail
+spec@arb_seamless_cube_map@arb_seamless_cubemap	fail
+spec@arb_separate_shader_objects@getprogrampipelineiv	crash(134)
+spec@arb_shader_objects@getuniformlocation-array-of-struct-of-array	fail
+spec@arb_texture_compression@texwrap formats bordercolor	fail
+spec@arb_texture_compression@texwrap formats bordercolor-swizzled	fail
+spec@arb_texture_cube_map@copyteximage cube	fail
+spec@arb_texture_cube_map@cubemap-getteximage-pbo	fail
+spec@arb_texture_float@arb_texture_float-get-tex3d	fail
+spec@arb_texture_float@texwrap formats	fail
+spec@arb_texture_float@texwrap formats bordercolor	fail
+spec@arb_texture_float@texwrap formats bordercolor-swizzled	fail
+spec@arb_texture_multisample@arb_texture_multisample-teximage-3d-multisample	fail
+spec@arb_texture_rectangle@1-1-linear-texture	fail
+spec@arb_texture_rectangle@copyteximage rect	fail
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drectshadow	pass
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow	pass
+spec@arb_texture_rectangle@texwrap rect bordercolor	fail
+spec@arb_texture_rectangle@texwrap rect proj bordercolor	fail
+spec@arb_vertex_program@clip-plane-transformation arb	fail
+spec@arb_vertex_program@minmax	fail
+spec@arb_vertex_program@vp-address-01	crash(134)
+spec@arb_vertex_program@vp-max-array	fail
+spec@ati_texture_compression_3dc@texwrap formats bordercolor	fail
+spec@ati_texture_compression_3dc@texwrap formats bordercolor-swizzled	fail
+spec@ext_framebuffer_blit@fbo-blit-check-limits	fail
+spec@ext_framebuffer_blit@fbo-readdrawpix	pass
+spec@ext_framebuffer_object@fbo-3d	fail
+spec@ext_framebuffer_object@fbo-blending-formats	fail
+spec@ext_framebuffer_object@fbo-depthtex	fail
+spec@ext_framebuffer_object@fbo-fragcoord2	pass
+spec@ext_framebuffer_object@fbo-generatemipmap-formats	fail
+spec@ext_framebuffer_object@fbo-scissor-bitmap	pass
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index1-blit	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index1-drawpixels	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index16-blit	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index16-drawpixels	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index4-blit	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index4-drawpixels	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index8-blit	fail
+spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index8-drawpixels	fail
+spec@ext_framebuffer_object@getteximage-formats init-by-clear-and-render	pass
+spec@ext_framebuffer_object@getteximage-formats init-by-rendering	pass
+spec@ext_packed_depth_stencil@fbo-blit-d24s8	fail
+spec@ext_packed_depth_stencil@fbo-clear-formats	fail
+spec@ext_packed_depth_stencil@fbo-depth-gl_depth24_stencil8-blit	fail
+spec@ext_packed_depth_stencil@fbo-depth-gl_depth24_stencil8-copypixels	fail
+spec@ext_packed_depth_stencil@fbo-depth-gl_depth24_stencil8-drawpixels	pass
+spec@ext_packed_depth_stencil@fbo-depthstencil-gl_depth24_stencil8-blit	fail
+spec@ext_packed_depth_stencil@fbo-depthstencil-gl_depth24_stencil8-copypixels	fail
+spec@ext_packed_depth_stencil@fbo-depthstencil-gl_depth24_stencil8-drawpixels-24_8	fail
+spec@ext_packed_depth_stencil@fbo-depthstencil-gl_depth24_stencil8-drawpixels-float-and-ushort	fail
+spec@ext_packed_depth_stencil@fbo-stencil-gl_depth24_stencil8-blit	fail
+spec@ext_packed_depth_stencil@fbo-stencil-gl_depth24_stencil8-drawpixels	fail
+spec@ext_packed_depth_stencil@texwrap formats	fail
+spec@ext_packed_depth_stencil@texwrap formats bordercolor	fail
+spec@ext_packed_depth_stencil@texwrap formats bordercolor-swizzled	fail
+spec@ext_texture_compression_latc@texwrap formats bordercolor	fail
+spec@ext_texture_compression_latc@texwrap formats bordercolor-swizzled	fail
+spec@ext_texture_compression_rgtc@fbo-generatemipmap-formats	fail
+spec@ext_texture_compression_rgtc@rgtc-teximage-01	fail
+spec@ext_texture_compression_rgtc@rgtc-teximage-02	fail
+spec@ext_texture_compression_rgtc@texwrap formats bordercolor	fail
+spec@ext_texture_compression_rgtc@texwrap formats bordercolor-swizzled	fail
+spec@ext_texture_compression_s3tc@texwrap formats bordercolor	fail
+spec@ext_texture_compression_s3tc@texwrap formats bordercolor-swizzled	fail
+spec@ext_texture_snorm@texwrap formats	fail
+spec@ext_texture_snorm@texwrap formats bordercolor	fail
+spec@ext_texture_snorm@texwrap formats bordercolor-swizzled	fail
+spec@glsl-1.10@built-in constants	fail
+spec@glsl-1.10@execution@clipping@clip-plane-transformation clipvert_pos	fail
+spec@glsl-1.10@execution@clipping@clip-plane-transformation fixed	fail
+spec@glsl-1.10@execution@clipping@clip-plane-transformation pos_clipvert	fail
+spec@glsl-1.10@execution@glsl-1.10-fragdepth	pass
+spec@glsl-1.20@built-in constants	fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 1dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 2dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 3d	fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 1dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 2dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 3d	fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 3d	fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2dshadow	pass
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 3d	fail
+wgl@wgl-multi-context-single-window	crash(127)
+wgl@wgl-multi-window-single-context	crash(127)
+wgl@wgl-sanity	crash(127)
