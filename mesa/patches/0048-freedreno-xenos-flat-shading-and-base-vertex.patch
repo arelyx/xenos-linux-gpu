@@ -1,27 +1,30 @@
-From e20ca9fc412aad3ccd3923a9320084dc797382b1 Mon Sep 17 00:00:00 2001
+From ccd684c2a86eeecadd5aa100f6dbea524e9fe328 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 07:41:01 -0700
 Subject: [PATCH] freedreno/xenos: flat shading and base vertex
 
 - SQ_INTERPOLATOR_CNTL's PARAM_SHADE bits were all set: every varying was
   interpolated. A set bit means interpolated, a clear one flat (found with
-  piglit glsl-fs-flat-color): clear the bits of flat varyings, and of
+  piglit glsl-fs-flat-color): clear the bits of flat varyings (taken from
+  the input variables: lowered IO reads every input with load_input on
+  some paths, so the intrinsic says nothing about interpolation), and of
   color inputs while the rasterizer has flatshade (glShadeModel(GL_FLAT)).
 - VGT_INDX_OFFSET is the base vertex of an indexed draw; it was 0.
 
 piglit glsl-fs-flat-color, arb-provoking-vertex-render, clipflat,
 line-flat-clip-color, gl-1.0-dlist-shademodel and the
-arb_draw_elements_base_vertex tests pass.
+arb_draw_elements_base_vertex tests pass. (A first version took every
+load_input as flat and failed every dEQP case with varyings.)
 
 Generated-by: LLM
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
 ---
  src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  3 ++-
- src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 15 +++++++++++++++
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 15 +++++++++++++
  src/gallium/drivers/freedreno/a2xx/ir2.h      |  4 ++++
- src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 12 ++++++++++++
- 4 files changed, 33 insertions(+), 1 deletion(-)
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 22 +++++++++++++++++++
+ 4 files changed, 43 insertions(+), 1 deletion(-)
 
 diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
 index 0ba81b8..5a2d3ea 100644
@@ -86,28 +89,45 @@ index c548608..2508226 100644
  
  struct ir2_shader_variant {
 diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
-index 027e685..63d85a6 100644
+index 027e685..7536909 100644
 --- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
 +++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
-@@ -933,6 +933,18 @@ setup_input(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+@@ -933,6 +933,16 @@ setup_input(struct ir2_context *ctx, nir_intrinsic_instr *intr)
     ctx->f->inputs[n].slot = slot;
     ctx->f->inputs[n].ncomp = MAX2(ctx->f->inputs[n].ncomp, ncomp);
  
-+   /* lowered IO: flat inputs are read with load_input, interpolated ones with
-+    * load_interpolated_input, whose barycentric source carries the mode */
-+   if (intr->intrinsic == nir_intrinsic_load_input) {
-+      ctx->f->flat_mask |= 1u << n;
-+   } else if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
-+      nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
-+      if (bary && nir_intrinsic_interp_mode(bary) == INTERP_MODE_NONE &&
-+          (slot == VARYING_SLOT_COL0 || slot == VARYING_SLOT_COL1 ||
-+           slot == VARYING_SLOT_BFC0 || slot == VARYING_SLOT_BFC1))
++   /* colors follow the rasterizer's flatshade unless declared otherwise
++    * (flat inputs come from the variables, see setup_inputs) */
++   if (slot == VARYING_SLOT_COL0 || slot == VARYING_SLOT_COL1 ||
++       slot == VARYING_SLOT_BFC0 || slot == VARYING_SLOT_BFC1) {
++      nir_intrinsic_instr *bary = intr->intrinsic == nir_intrinsic_load_interpolated_input ?
++         nir_src_as_intrinsic(intr->src[0]) : NULL;
++      if (!bary || nir_intrinsic_interp_mode(bary) == INTERP_MODE_NONE)
 +         ctx->f->color_mask |= 1u << n;
 +   }
 +
     /* nir_intrinsic_io_semantics(intr).interp_mode?
      * opengl ES 2.0 can't do flat mode, but we still get it from GALLIUM_HUD
      */
+@@ -955,6 +965,18 @@ setup_inputs(struct ir2_context *ctx)
+             setup_input(ctx, intr);
+       }
+    }
++
++   /* flat varyings: lowered IO reads every input with load_input on some
++    * paths, so take the interpolation from the variables */
++   if (ctx->so->type == MESA_SHADER_FRAGMENT) {
++      nir_foreach_shader_in_variable (var, ctx->nir) {
++         unsigned n = var->data.driver_location;
++         if (var->data.interpolation == INTERP_MODE_FLAT && n < 16)
++            ctx->f->flat_mask |= 1u << n;
++         if (var->data.interpolation != INTERP_MODE_NONE && n < 16)
++            ctx->f->color_mask &= ~(1u << n);
++      }
++   }
+ }
+ 
+ static void
 -- 
 2.53.0
 

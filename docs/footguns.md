@@ -40,6 +40,8 @@ Things that cost us hours. Most are obvious in hindsight.
 - **Benchmarks and conformance didn't resize windows.** The in-batch texture barrier passed x11perf, xcopytest, a 7-minute Xfce soak and the full dEQP run, then hung the GPU the first time someone dragged a window corner. `xorg/xresize.c` is now part of the checks.
 - **The kernel's ring-space wait doesn't count as a stall.** When the GPU stops while the ring is full, Xorg spins in the submit ioctl at 100% CPU and `fence_stalls` stays 0. Read `COHER_STATUS_HOST` (0x0a31) and `CP_RB_RPTR` with `xereg` to see where it stopped.
 
+- **A change that passes its piglit tests can still break every dEQP case.** The first flat-shading fix took every `load_input` in a fragment shader as flat, which is true for the GLSL path piglit's flat tests use but not for others: every dEQP case with a varying failed (and ran ten times slower in image comparison). Run a dEQP sample before pushing a shader-state change, not only the tests it targets.
+
 ## Process
 
 - **`pkill -f <pattern>` matches the shell that runs it** when the pattern appears in the command line. We killed our own SSH session and our own harness this way. Match exact process names (`pkill -x xbox-cycle`) or check `/proc/<pid>/cmdline`.
