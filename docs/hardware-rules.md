@@ -125,6 +125,10 @@ libxenon's RBBM soft-reset sequence hung the whole console when tried. A wedged 
 
 A Python `mmap` slice did byte loads from the register BAR and froze the console.
 
+### 23. Linear textures lay out mips differently from tiled ones
+
+In the linear layout, each mip level's rows are aligned to 256 bytes (Xenia's `texture_util`, `kTextureLinearRowAlignmentBytes`). freedreno's a2xx layout aligns rows to 32 texels for both, which is right for tiled textures only. Cube maps and textures in formats that can't be render targets (L8, A8, LA88, 16-bit float) stayed linear, and with mipmaps they sampled the wrong texels: about 240 dEQP cases. Mesa now tiles every 2D and cube texture except staging and compressed ones, and the CPU (de)tiles on map, as for render targets.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
@@ -139,7 +143,3 @@ A Python `mmap` slice did byte loads from the register BAR and froze the console
 - Use `-mcpu=970 -mtune=cell -mno-altivec` for user space. Ubuntu's ppc64 cross GCC defaults to POWER7, which SIGILLs immediately.
 - An idle SMT sibling spins and steals about 45% of the core, because Xenon has no power-save hook. `kernel/xenon_idle` installs a low-priority idle loop.
 - The SMC reports power-on reasons: physical eject `0x12`, Xbox remote IR `0x20`, Media Center remote IR power `0x31` (Free60 lists `0x24`; this SMC said `0x31`).
-
-### 23. Linear textures lay out mips differently from tiled ones
-
-In the linear layout, each mip level's rows are aligned to 256 bytes (Xenia's `texture_util`, `kTextureLinearRowAlignmentBytes`). freedreno's a2xx layout aligns rows to 32 texels for both, which is right for tiled textures only. Cube maps and textures in formats that can't be render targets (L8, A8, LA88, 16-bit float) stayed linear, and with mipmaps they sampled the wrong texels: about 240 dEQP cases. Mesa now tiles every 2D and cube texture except staging and compressed ones, and the CPU (de)tiles on map, as for render targets.
