@@ -1,0 +1,157 @@
+From bfb758082ee66fd899b1c69148fb6a5171456d13 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:58:04 -0700
+Subject: [PATCH] freedreno/xenos: gl_PointCoord
+
+- Xenos generates sprite coordinates only when the vertex shader exports
+  the point size (POSITION_2_VECTORS_SPRITE): have st always add
+  gl_PointSize (PIPE_POINT_SIZE_LOWER_ALWAYS).
+- st then stores gl_PointSize twice (1.0, then the clamped glPointSize);
+  ir2 put both into one export instruction and the hardware kept the
+  first. Drop store_outputs that a later store overwrites.
+- The generated parameter's sign bits flag the primitive type: abs().
+- Its y grows towards GL's +y: flip it to the upper-left origin and let
+  st's pntc y transform (lower_wpos_pntc) handle sprite origin and FBO
+  vs window.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 61 +++++++++++++++++++
+ .../drivers/freedreno/freedreno_screen.c      |  5 ++
+ 2 files changed, 66 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 208c4a7..6708e58 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -9,6 +9,7 @@
+ #include "ir2_private.h"
+ #include "compiler/nir/nir_builder.h"
+ 
++#include "fd2_emit.h"
+ #include "fd2_program.h"
+ #include "freedreno_util.h"
+ #include "nir_legacy.h"
+@@ -43,6 +44,9 @@ static const nir_shader_compiler_options options = {
+    .force_indirect_unrolling = nir_var_all,
+    .force_indirect_unrolling_sampler = true,
+    .max_unroll_iterations = 32,
++   /* st flips gl_PointCoord.y for the sprite origin and the window/FBO y
++    * direction; the backend gives it upper-left-origin coordinates */
++   .lower_wpos_pntc = true,
+ };
+ 
+ const nir_shader_compiler_options *
+@@ -137,6 +141,21 @@ ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
+    return true;
+ }
+ 
++/* Xenos: the sprite coordinate's y grows towards GL's +y; st expects the
++ * upper-left origin (lower_wpos_pntc), so use 1 - y */
++static bool
++ir2_flip_point_coord(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_load_point_coord)
++      return false;
++   b->cursor = nir_after_instr(&intr->instr);
++   nir_def *pc = &intr->def;
++   nir_def *flipped = nir_vec2(b, nir_channel(b, pc, 0),
++                               nir_fsub(b, nir_imm_float(b, 1.0f), nir_channel(b, pc, 1)));
++   nir_def_rewrite_uses_after(pc, flipped);
++   return true;
++}
++
+ /* getGradients works on one value at a time: split vector derivatives */
+ static bool
+ ir2_scalarize_derivatives(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+@@ -211,6 +230,8 @@ ir2_optimize_nir(nir_shader *s, bool lower)
+       OPT_V(s, nir_shader_tex_pass, ir2_lower_tex_shadow, nir_metadata_control_flow, NULL);
+       OPT_V(s, nir_shader_tex_pass, ir2_lower_txf, nir_metadata_control_flow, NULL);
+       OPT_V(s, nir_shader_intrinsics_pass, ir2_scalarize_derivatives, nir_metadata_control_flow, NULL);
++      if (fd2_xenos && s->info.stage == MESA_SHADER_FRAGMENT)
++         OPT_V(s, nir_shader_intrinsics_pass, ir2_flip_point_coord, nir_metadata_control_flow, NULL);
+    }
+ 
+    ir2_optimize_loop(s);
+@@ -784,6 +805,9 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+       instr = instr_create_alu_dest(ctx, nir_op_mov, &intr->def);
+       instr->src[0] =
+          ir2_src(ctx->f->inputs_count, IR2_SWIZZLE_ZW, IR2_SRC_INPUT);
++      /* Xenos: the sign bits of the generated parameter flag the primitive
++       * type, so take abs (Xenia registers.h SQ_CONTEXT_MISC) */
++      instr->src[0].abs = ctx->so->is_xenos;
+       break;
+    case nir_intrinsic_ddx:
+    case nir_intrinsic_ddx_fine:
+@@ -1310,6 +1334,41 @@ ir2_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
+    return false;
+ }
+ 
++/* Drop store_outputs that a later store to the same output and components in
++ * the same block overwrites. st's point size lowering stores gl_PointSize
++ * twice (1.0, then the clamped glPointSize); ir2 emitted both into one
++ * export instruction and the hardware took the first (no point sprites). */
++static void
++ir2_remove_overwritten_outputs(nir_shader *s)
++{
++   nir_foreach_function_impl (impl, s) {
++      nir_foreach_block (block, impl) {
++         nir_foreach_instr_safe (instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            nir_intrinsic_instr *a = nir_instr_as_intrinsic(instr);
++            if (a->intrinsic != nir_intrinsic_store_output)
++               continue;
++            unsigned loc = nir_intrinsic_io_semantics(a).location;
++            unsigned mask = nir_intrinsic_write_mask(a) << nir_intrinsic_component(a);
++            for (nir_instr *n = nir_instr_next(instr); n; n = nir_instr_next(n)) {
++               if (n->type != nir_instr_type_intrinsic)
++                  continue;
++               nir_intrinsic_instr *b = nir_instr_as_intrinsic(n);
++               if (b->intrinsic != nir_intrinsic_store_output ||
++                   nir_intrinsic_io_semantics(b).location != loc)
++                  continue;
++               unsigned bmask = nir_intrinsic_write_mask(b) << nir_intrinsic_component(b);
++               if ((mask & ~bmask) == 0) {
++                  nir_instr_remove(instr);
++                  break;
++               }
++            }
++         }
++      }
++   }
++}
++
+ void
+ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+ {
+@@ -1328,6 +1387,8 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+ 
+    if (binning)
+       cleanup_binning(ctx);
++   if (so->is_xenos)
++      ir2_remove_overwritten_outputs(ctx->nir);
+ 
+    OPT_V(ctx->nir, nir_opt_copy_prop);
+    OPT_V(ctx->nir, nir_opt_dce);
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 9f44388..56b4725 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -628,6 +628,11 @@ fd_init_screen_caps(struct fd_screen *screen)
+     * it for later HW.
+     */
+    caps->gl_clamp = is_a2xx(screen);
++   /* Xenos generates point sprite coordinates only with the point size
++    * exported by the vertex shader (POSITION_2_VECTORS_SPRITE): have st add
++    * gl_PointSize from glPointSize */
++   if (is_xenos(screen))
++      caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
+ 
+    caps->clip_planes =
+       /* Gens that support GS, have GS lowered into a quasi-VS which confuses
+-- 
+2.53.0
+

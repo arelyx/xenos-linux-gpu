@@ -168,6 +168,10 @@ One bit per parameter. All set (what we wrote since bring-up) interpolates every
 
 Xenos has six user clip planes like R300: enable bits 0-5 of `PA_CL_CLIP_CNTL`, planes in `PA_CL_UCP_0_X`.. at 0x2388 (four floats each), tested against the clip-space position. 3D textures sample correctly from the linear layout Xenia documents (256-byte rows, slices padded to 32 rows, depth padded to 4, the level to 4 KB); the fetch constant's size dword is 11/11/10 bits for 3D, and the fetch instruction needs all three coordinate components live. Measured with `gltest/gl3d.c`.
 
+### 33. Point sprite coordinates need an exported point size
+
+The pixel shader's generated parameter (`SQ_CONTEXT_MISC.PARAM_GEN_POS`) holds the sprite coordinate in zw only when the vertex shader exports the point size and `VS_EXPORT_MODE` is `POSITION_2_VECTORS_SPRITE`; with the size from `PA_SU_POINT_SIZE` alone zw stay 0. The sign bits of the parameter flag the primitive type (Xenia's notes), so take `abs()`, and w grows towards GL's +y in a framebuffer object (bottom of the point is 0). Measured with `gltest/glpointcoord.c`.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
