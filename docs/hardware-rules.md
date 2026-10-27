@@ -149,6 +149,10 @@ A texture fetch constant with dimension 1D wedged the GPU (piglit `fbo-depth tex
 
 Mesa saves and restores depth between batches through the color path (the EDRAM depth area resolved as an 8888 color buffer and drawn back as one). That round-trips, but the copy in memory isn't depth as the CPU or the texture unit expects it, measured with `gltest/gldepthonly.c` (`READ=1`): within each 80-pixel EDRAM tile the two 40-pixel halves are swapped, and each word is the depth value with its bytes reversed and rotated (byte-swap, then rotate right by 8, gives Mesa's Z24S8). So depth read back by the CPU, blitted or sampled as a texture is wrong (most of piglit's depth failures). A first try at resolving through the depth path instead (copy source 4, `k_24_8`, endian 0 or 2) wrote zeros past the first 32 pixels of the first row; open.
 
+### 29. getGradients gives derivatives
+
+The texture fetch opcode `TEX_GET_GRADIENTS` (18) returns d/dx and d/dy of its source's x component in .x and .y (no texture involved). ir2 implements GLSL `dFdx`, `dFdy` and `fwidth` with it, one component at a time; piglit `glsl-derivs`, `glsl-fwidth` and `fbo-deriv` pass.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

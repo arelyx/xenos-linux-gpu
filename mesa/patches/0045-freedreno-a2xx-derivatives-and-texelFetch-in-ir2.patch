@@ -1,0 +1,170 @@
+From 9bd089e3ce9f189df5d50e9db0d4e2dee9a57ea5 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 05:40:32 -0700
+Subject: [PATCH] freedreno/a2xx: derivatives and texelFetch in ir2
+
+- ddx/ddy (fine and coarse) through the getGradients fetch, which returns
+  d/dx and d/dy of its source's x in .x and .y; vector derivatives are
+  split per component first.
+- txf on 2D and rectangle textures becomes a txl at the texel center with
+  unnormalized coordinates; Mesa's blits and glCopyTexImage use it.
+
+ir2 aborted on both before. piglit glsl-derivs, glsl-fwidth and
+fbo-deriv pass on Xenos; copyteximage and the depth/stencil blit tests no
+longer crash.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/ir2_assemble.c     | 19 +++++-
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 67 +++++++++++++++++++
+ .../drivers/freedreno/a2xx/ir2_private.h      |  1 +
+ 3 files changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index 3d301f3..c9e2436 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -118,9 +118,11 @@ fetch_dst_swiz(struct ir2_context *ctx, struct ir2_instr *instr)
+ {
+    struct ir2_reg_component *comp = get_reg(instr)->comp;
+    unsigned dst_swiz = 0xfff;
++   /* getGradients returns d/dx and d/dy of its source's x in .x and .y */
++   unsigned first = (instr->fetch.opc == TEX_GET_GRADIENTS && instr->fetch.tex.grad_y) ? 1 : 0;
+    for (int i = 0; i < dst_ncomp(instr); i++) {
+       dst_swiz &= ~(7 << comp[i].c * 3);
+-      dst_swiz |= i << comp[i].c * 3;
++      dst_swiz |= (i + first) << comp[i].c * 3;
+    }
+    return dst_swiz;
+ }
+@@ -218,6 +220,21 @@ fill_instr(struct ir2_context *ctx, struct ir2_sched_instr *sched, instr_t *bc,
+          tex->use_reg_lod = instr->src_count == 2;
+          tex->sample_location = SAMPLE_CENTER;
+          tex->tx_coord_denorm = instr->fetch.tex.is_rect;
++      } else if (instr->fetch.opc == TEX_GET_GRADIENTS) {
++         instr_fetch_tex_t *tex = &bc->fetch.tex;
++
++         tex->src_reg = src_to_reg(ctx, src);
++         tex->src_swiz = fetch_swizzle(ctx, src, 3);
++         tex->dst_reg = dst_to_reg(ctx, instr);
++         tex->dst_swiz = fetch_dst_swiz(ctx, instr);
++         tex->mag_filter = TEX_FILTER_USE_FETCH_CONST;
++         tex->min_filter = TEX_FILTER_USE_FETCH_CONST;
++         tex->mip_filter = TEX_FILTER_USE_FETCH_CONST;
++         tex->aniso_filter = ANISO_FILTER_USE_FETCH_CONST;
++         tex->arbitrary_filter = ARBITRARY_FILTER_USE_FETCH_CONST;
++         tex->vol_mag_filter = TEX_FILTER_USE_FETCH_CONST;
++         tex->vol_min_filter = TEX_FILTER_USE_FETCH_CONST;
++         tex->sample_location = SAMPLE_CENTER;
+       } else if (instr->fetch.opc == TEX_SET_TEX_LOD) {
+          instr_fetch_tex_t *tex = &bc->fetch.tex;
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 89ce06b..027e685 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -128,6 +128,57 @@ ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
+    return true;
+ }
+ 
++/* getGradients works on one value at a time: split vector derivatives */
++static bool
++ir2_scalarize_derivatives(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   switch (intr->intrinsic) {
++   case nir_intrinsic_ddx: case nir_intrinsic_ddx_fine: case nir_intrinsic_ddx_coarse:
++   case nir_intrinsic_ddy: case nir_intrinsic_ddy_fine: case nir_intrinsic_ddy_coarse:
++      break;
++   default:
++      return false;
++   }
++   if (intr->def.num_components == 1)
++      return false;
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def *comps[4];
++   for (unsigned i = 0; i < intr->def.num_components; i++) {
++      nir_intrinsic_instr *c = nir_intrinsic_instr_create(b->shader, intr->intrinsic);
++      c->src[0] = nir_src_for_ssa(nir_channel(b, intr->src[0].ssa, i));
++      c->num_components = 1;
++      nir_def_init(&c->instr, &c->def, 1, intr->def.bit_size);
++      nir_builder_instr_insert(b, &c->instr);
++      comps[i] = &c->def;
++   }
++   nir_def_replace(&intr->def, nir_vec(b, comps, intr->def.num_components));
++   return true;
++}
++
++/* texelFetch (txf, used by Mesa's blits and copies): sample at the texel
++ * center with unnormalized coordinates, as for rectangle textures, at the
++ * given level. 2D only. */
++static bool
++ir2_lower_txf(nir_builder *b, nir_tex_instr *tex, void *data)
++{
++   if (tex->op != nir_texop_txf ||
++       (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && tex->sampler_dim != GLSL_SAMPLER_DIM_RECT))
++      return false;
++
++   b->cursor = nir_before_instr(&tex->instr);
++   int c = nir_tex_instr_src_index(tex, nir_tex_src_coord);
++   if (c >= 0) {
++      nir_def *coord = nir_fadd_imm(b, nir_i2f32(b, tex->src[c].src.ssa), 0.5f);
++      nir_src_rewrite(&tex->src[c].src, coord);
++   }
++   int l = nir_tex_instr_src_index(tex, nir_tex_src_lod);
++   if (l >= 0)
++      nir_src_rewrite(&tex->src[l].src, nir_i2f32(b, tex->src[l].src.ssa));
++   tex->op = nir_texop_txl;
++   tex->sampler_dim = GLSL_SAMPLER_DIM_RECT;
++   return true;
++}
++
+ int
+ ir2_optimize_nir(nir_shader *s, bool lower)
+ {
+@@ -149,6 +200,8 @@ ir2_optimize_nir(nir_shader *s, bool lower)
+       OPT_V(s, ir3_nir_apply_trig_workarounds);
+       OPT_V(s, nir_lower_tex, &tex_options);
+       OPT_V(s, nir_shader_tex_pass, ir2_lower_tex_shadow, nir_metadata_control_flow, NULL);
++      OPT_V(s, nir_shader_tex_pass, ir2_lower_txf, nir_metadata_control_flow, NULL);
++      OPT_V(s, nir_shader_intrinsics_pass, ir2_scalarize_derivatives, nir_metadata_control_flow, NULL);
+    }
+ 
+    ir2_optimize_loop(s);
+@@ -720,6 +773,20 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+       instr->src[0] =
+          ir2_src(ctx->f->inputs_count, IR2_SWIZZLE_ZW, IR2_SRC_INPUT);
+       break;
++   case nir_intrinsic_ddx:
++   case nir_intrinsic_ddx_fine:
++   case nir_intrinsic_ddx_coarse:
++   case nir_intrinsic_ddy:
++   case nir_intrinsic_ddy_fine:
++   case nir_intrinsic_ddy_coarse: {
++      /* getGradients (scalarized by ir2_scalarize_derivatives) */
++      instr = ir2_instr_create_fetch(ctx, &intr->def, TEX_GET_GRADIENTS);
++      instr->src[0] = make_src_noconst(ctx, intr->src[0]);
++      instr->fetch.tex.grad_y = intr->intrinsic == nir_intrinsic_ddy ||
++                                intr->intrinsic == nir_intrinsic_ddy_fine ||
++                                intr->intrinsic == nir_intrinsic_ddy_coarse;
++      break;
++   }
+    default:
+       compile_error(ctx, "unimplemented intr %s\n", nir_intrinsic_infos[intr->intrinsic].name);
+       break;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 94d769e..1a7293d 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -95,6 +95,7 @@ struct ir2_instr {
+             } vtx;
+             struct {
+                bool is_cube : 1;
++               bool grad_y : 1;   /* TEX_GET_GRADIENTS: keep d/dy (.y) instead of d/dx */
+                bool is_rect : 1;
+                uint8_t samp_id;
+             } tex;
+-- 
+2.53.0
+
