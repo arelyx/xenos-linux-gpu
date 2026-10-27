@@ -1,0 +1,208 @@
+From dedbd3d355c7c493268c735327b4bc173e2cd0ea Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:45:03 -0700
+Subject: [PATCH] freedreno/xenos: resolve depth through the depth path
+
+Depth used to reach memory through the color path, which leaves the
+40-pixel halves of each 80-pixel EDRAM tile swapped, so depth read by the
+CPU, sampled by shaders or blitted was wrong. Now:
+
+- the resolve copies depth (RB_COPY_CONTROL source 4, raw copy) into
+  k_24_8 with endian 0: pixels in natural order, each word the hardware's
+  D24S8 byte-swapped;
+- the restore still writes EDRAM through the color path, in 40-pixel
+  strips across the whole row, each sampling its partner strip;
+- the CPU converts between that word and Mesa's Z24S8 in both directions
+  (this replaces the read-only unswizzle of the previous patch).
+
+Every 128/160/250-pixel case of gltest/gldepthonly reads back exact, before
+and after a restore; piglit fbo-depth readpixels (z16, z24, z24s8),
+fbo-depth-sample-compare, depth-tex-modes and glsl-fs-fragcoord-zw-ortho
+pass. A restore needs a WAIT_UNTIL before rewriting the vertex buffer's
+texture coordinates between strips, or a strip draws with the next one's.
+XENOS_DEPTH_COLOR_PATH=1 brings back the old path.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 86 +++++++++++++++++--
+ .../drivers/freedreno/freedreno_resource.c    | 25 +++---
+ 2 files changed, 93 insertions(+), 18 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index dd18e61..fb33d9c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -103,6 +103,17 @@ xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x
+ /* set while fd2_xenos_texture_barrier() emits its resolve */
+ static bool xenos_in_barrier;
+ 
++/* XENOS_DEPTH_COLOR_PATH=1: resolve and restore depth through the color path
++ * as before (experiment hook) */
++bool xenos_depth_path(void);
++bool
++xenos_depth_path(void)
++{
++   static int v = -1;
++   if (v < 0) v = !getenv("XENOS_DEPTH_COLOR_PATH");
++   return v;
++}
++
+ /* transfer from gmem to system memory (ie. normal RAM) */
+ 
+ static void
+@@ -122,7 +133,12 @@ emit_gmem2mem_surf(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t
+       return;
+ 
+    if (is_xenos(batch->ctx->screen)) {
+-      bool depth = util_format_is_depth_or_stencil(format);
++      /* Depth goes through the depth path (copy source 4, raw copy into
++       * k_24_8, endian 0): pixels land in natural order, each word the
++       * byte-swapped D24S8 (hardware rule 28). Through the color path, each
++       * 80-pixel tile's halves came out swapped. */
++      bool zpath = xenos_depth_path() && util_format_is_depth_or_stencil(psurf->format);
++      bool depth = zpath || util_format_is_depth_or_stencil(format);
+       uint32_t height = align(pipe_surface_height(psurf), 32);   /* Xenia aligns copy_dest_height to 32 */
+ 
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+@@ -135,10 +151,10 @@ emit_gmem2mem_surf(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t
+       }
+       OUT_PKT3(ring, CP_SET_CONSTANT, 5);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_COPY_CONTROL));
+-      OUT_RING(ring, xenos_rb_copy_control(depth));
++      OUT_RING(ring, zpath ? 4u /* depth, raw copy */ : xenos_rb_copy_control(depth));
+       OUT_RELOC(ring, rsc->bo, offset, 0, 0); /* RB_COPY_DEST_BASE */
+       OUT_RING(ring, xenos_rb_copy_dest_pitch(pitch, height));
+-      OUT_RING(ring, xenos_rb_copy_dest_info(format));
++      OUT_RING(ring, zpath ? (22u << 7) /* k_24_8, endian 0 */ : xenos_rb_copy_dest_info(format));
+       OUT_WFI(ring);
+       OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+       OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
+@@ -315,6 +331,25 @@ fd2_emit_tile_gmem2mem(struct fd_batch *batch, const struct fd_tile *tile)
+ 
+ /* transfer from system memory to gmem */
+ 
++/* Xenos: the restore's texture coordinates live in the solid vertex buffer,
++ * written by the CP (one MEM_WRITE per dword, little-endian) */
++static void
++xenos_restore_texcoords(struct fd_ringbuffer *ring, struct fd2_context *fd2_ctx,
++                        float x0, float y0, float x1, float y1)
++{
++   const float v[6] = {x0, y0, x1, y0, x0, y1};
++   /* the previous draw may not have fetched its coordinates yet */
++   OUT_PKT0(ring, 0x05c8, 1);    /* WAIT_UNTIL */
++   OUT_RING(ring, 0x00020000);   /* 3D idle and clean */
++   for (int k = 0; k < 6; k++) {
++      OUT_PKT3(ring, CP_MEM_WRITE, 2);
++      OUT_RELOC(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo, 36 + 4 * k, 0, 0);
++      OUT_RING(ring, UTIL_ARCH_BIG_ENDIAN ? util_bswap32(fui(v[k])) : fui(v[k]));
++   }
++   fd2_xenos_invalidate_bo(ring, fd_resource(fd2_ctx->solid_vertexbuf)->bo,
++                           fd_bo_size(fd_resource(fd2_ctx->solid_vertexbuf)->bo));
++}
++
+ static void
+ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+                    struct pipe_surface *psurf)
+@@ -511,8 +546,49 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+    OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
+    OUT_RING(ring, 0x00000000);
+ 
+-   if (fd_gmem_needs_restore(batch, tile, FD_BUFFER_DEPTH | FD_BUFFER_STENCIL))
+-      emit_mem2gmem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf);
++   if (fd_gmem_needs_restore(batch, tile, FD_BUFFER_DEPTH | FD_BUFFER_STENCIL)) {
++      if (is_xenos(ctx->screen) && xenos_depth_path()) {
++         /* Memory holds depth in natural order (depth-path resolve), but the
++          * restore writes EDRAM through the color path, where a depth tile
++          * keeps the 40-pixel halves of each 80-pixel tile swapped: restore
++          * 40-pixel strips, each from its partner strip. Strips stop at the
++          * framebuffer width rounded up to 8; a strip whose partner lies past
++          * the framebuffer holds pixels nobody can see. */
++         /* whole rows: a dirty pixel's depth may sit in the other half of
++          * its tile */
++         unsigned x_end = align(pfb->width, 8);
++         OUT_PKT3(ring, CP_SET_CONSTANT, 5);
++         OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
++         OUT_RING(ring, fui((float)x_end / 2.0f));
++         OUT_RING(ring, fui((float)x_end / 2.0f));
++         OUT_RING(ring, fui(-(float)bin_h / 2.0f));
++         OUT_RING(ring, fui(sy + (float)bin_h / 2.0f));
++         for (unsigned s0 = 0; s0 < x_end; s0 += 40) {
++            int delta = (s0 % 80) < 40 ? 40 : -40;
++            unsigned c0 = s0, c1 = MIN2(s0 + 40, x_end);
++            xenos_restore_texcoords(ring, fd2_ctx, (float)delta / pfb->width, y0,
++                                    (float)(x_end + delta) / pfb->width, y1);
++            OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++            OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
++            OUT_RING(ring, A2XX_PA_SC_WINDOW_OFFSET_DISABLE | xy2d(c0, sy));
++            OUT_RING(ring, xy2d(c1, sy + bin_h));
++            emit_mem2gmem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf);
++         }
++         xenos_restore_texcoords(ring, fd2_ctx, x0, y0, x1, y1);
++         OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++         OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
++         OUT_RING(ring, A2XX_PA_SC_WINDOW_OFFSET_DISABLE | xy2d(sx, sy));
++         OUT_RING(ring, xy2d(sx + bin_w, sy + bin_h));
++         OUT_PKT3(ring, CP_SET_CONSTANT, 5);
++         OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_XSCALE));
++         OUT_RING(ring, fui((float)bin_w / 2.0f));
++         OUT_RING(ring, fui(sx + (float)bin_w / 2.0f));
++         OUT_RING(ring, fui(-(float)bin_h / 2.0f));
++         OUT_RING(ring, fui(sy + (float)bin_h / 2.0f));
++      } else {
++         emit_mem2gmem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf);
++      }
++   }
+ 
+    if (fd_gmem_needs_restore(batch, tile, FD_BUFFER_COLOR))
+       emit_mem2gmem_surf(batch, gmem->cbuf_base[0], &pfb->cbufs[0]);
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 17d863c..26a8f5f 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -714,6 +714,7 @@ fd_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
+    fd_resource_wait(ctx, rsc, FD_BO_PREP_FLUSH);
+ }
+ 
++bool xenos_depth_path(void);
+ static void xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *box,
+                             uint8_t *linear, unsigned stride, bool to_linear);
+ 
+@@ -825,22 +826,20 @@ xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *
+    unsigned cpp = rsc->layout.cpp;
+    unsigned pitch_px = fd_resource_pitch(rsc, level) / cpp;
+ 
+-   /* Depth/stencil reaches memory through the color path (fd2_gmem.c): within
+-    * each 80-pixel EDRAM tile the 40-pixel halves are swapped, and each word
+-    * is Mesa's Z24S8 byte-swapped and rotated left by 8 (hardware rule 28).
+-    * Reads undo that. Writes stay as they are: depth textures the CPU uploads
+-    * are sampled, and the texture unit reads them in Mesa's layout. */
+-   if (util_format_is_depth_or_stencil(rsc->b.b.format) && cpp == 4 && to_linear) {
++   /* Depth/stencil in memory is the hardware's D24S8 byte-swapped (hardware
++    * rule 28, depth-path resolve): convert to and from Mesa's Z24S8. */
++   if (util_format_is_depth_or_stencil(rsc->b.b.format) && cpp == 4 && xenos_depth_path()) {
+       for (int y = 0; y < box->height; y++) {
+          for (int x = 0; x < box->width; x++) {
+-            unsigned px = box->x + x;
+-            unsigned sx = px / 80 * 80 + (px % 80 + 40) % 80;
+-            if (sx >= pitch_px)   /* swapped half past the end of the row: not resolved */
+-               sx = px;
+-            uint32_t *t = (uint32_t *)(tiled + (size_t)xenos_tiled_texel(sx, box->y + y, pitch_px, cpp) * cpp);
++            uint32_t *t = (uint32_t *)(tiled + (size_t)xenos_tiled_texel(box->x + x, box->y + y, pitch_px, cpp) * cpp);
+             uint32_t *l = (uint32_t *)(linear + (size_t)y * stride + (size_t)x * cpp);
+-            uint32_t v = __builtin_bswap32(*t);
+-            *l = (v >> 8) | (v << 24);
++            if (to_linear) {
++               uint32_t v = __builtin_bswap32(*t);
++               *l = (v >> 8) | (v << 24);
++            } else {
++               uint32_t v = *l;
++               *t = __builtin_bswap32((v << 8) | (v >> 24));
++            }
+          }
+       }
+       return;
+-- 
+2.53.0
+

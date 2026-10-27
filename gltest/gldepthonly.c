@@ -55,6 +55,11 @@ int main(int argc, char **argv)
 		glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS);
 		glBegin(GL_QUADS); glVertex3f(-1, -1, -0.5f); glVertex3f(0, -1, -0.5f); glVertex3f(0, 1, -0.5f); glVertex3f(-1, 1, -0.5f);
 		glVertex3f(0, -1, 0.5f); glVertex3f(1, -1, 0.5f); glVertex3f(1, 0, 0.5f); glVertex3f(0, 0, 0.5f); glEnd();
+		if (getenv("TWO")) {   /* end the batch, then draw a speck: the next batch restores depth */
+			glFinish();
+			glDepthFunc(GL_NEVER);
+			glBegin(GL_QUADS); glVertex3f(-1, -1, 0); glVertex3f(-0.99f, -1, 0); glVertex3f(-0.99f, -0.99f, 0); glVertex3f(-1, -0.99f, 0); glEnd();
+		}
 		static float d[320 * 320];
 		glReadPixels(0, 0, S, S, GL_DEPTH_COMPONENT, GL_FLOAT, d);
 		for (int y = 0; y < S; y += S / 4) {
