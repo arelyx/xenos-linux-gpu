@@ -1,0 +1,35 @@
+[build] duration=5:use-vbo=false: FPS: 726 FrameTime: 1.379 ms
+[build] duration=5:use-vbo=true: FPS: 928 FrameTime: 1.078 ms
+[texture] duration=5:texture-filter=nearest: FPS: 857 FrameTime: 1.168 ms
+[texture] duration=5:texture-filter=linear: FPS: 848 FrameTime: 1.180 ms
+[texture] duration=5:texture-filter=mipmap: FPS: 852 FrameTime: 1.174 ms
+[shading] duration=5:shading=gouraud: FPS: 865 FrameTime: 1.157 ms
+[shading] duration=5:shading=blinn-phong-inf: FPS: 840 FrameTime: 1.192 ms
+[shading] duration=5:shading=phong: FPS: 806 FrameTime: 1.241 ms
+[shading] duration=5:shading=cel: FPS: 762 FrameTime: 1.313 ms
+[bump] bump-render=high-poly:duration=5: FPS: 727 FrameTime: 1.377 ms
+[bump] bump-render=normals:duration=5: FPS: 915 FrameTime: 1.093 ms
+[bump] bump-render=height:duration=5: FPS: 829 FrameTime: 1.207 ms
+[effect2d] duration=5:kernel=0,1,0;1,-4,1;0,1,0;: FPS: 462 FrameTime: 2.165 ms
+[effect2d] duration=5:kernel=1,1,1,1,1;1,1,1,1,1;1,1,1,1,1;: FPS: 223 FrameTime: 4.486 ms
+[pulsar] duration=5:light=false:quads=5:texture=false: FPS: 707 FrameTime: 1.416 ms
+[desktop] blur-radius=5:duration=5:effect=blur:passes=1:separable=true:windows=4: FPS: 133 FrameTime: 7.524 ms
+[desktop] duration=5:effect=shadow:windows=4: FPS: 341 FrameTime: 2.937 ms
+[buffer] columns=200:duration=5:interleave=false:update-dispersion=0.9:update-fraction=0.5:update-method=map: FPS: 71 FrameTime: 14.094 ms
+[buffer] columns=200:duration=5:interleave=true:update-dispersion=0.9:update-fraction=0.5:update-method=map: FPS: 151 FrameTime: 6.632 ms
+[ideas] duration=5:speed=duration: FPS: 239 FrameTime: 4.188 ms
+[jellyfish] duration=5: FPS: 503 FrameTime: 1.991 ms
+[shadow] duration=5: FPS: 245 FrameTime: 4.082 ms
+[refract] FAIL Error: Failed to set up the render target for the depth pass [refract] duration=5: Set up failed 
+[conditionals] duration=5:fragment-steps=0:vertex-steps=0: FPS: 869 FrameTime: 1.152 ms
+[conditionals] duration=5:fragment-steps=5:vertex-steps=0: FPS: 653 FrameTime: 1.533 ms
+[conditionals] duration=5:fragment-steps=0:vertex-steps=5: FPS: 868 FrameTime: 1.152 ms
+[function] duration=5:fragment-complexity=low:fragment-steps=5: FPS: 783 FrameTime: 1.278 ms
+[function] duration=5:fragment-complexity=medium:fragment-steps=5: FPS: 663 FrameTime: 1.509 ms
+[loop] duration=5:fragment-loop=false:fragment-steps=5:vertex-steps=5: FPS: 779 FrameTime: 1.284 ms
+[loop] duration=5:fragment-steps=5:fragment-uniform=false:vertex-steps=5: FPS: 777 FrameTime: 1.289 ms
+[loop] duration=5:fragment-steps=5:fragment-uniform=true:vertex-steps=5: FPS: 625 FrameTime: 1.601 ms
+# after Mesa 0033/0034 (first run: terrain hung the GPU, buffer subdata 24 fps)
+[buffer] columns=200:duration=5:interleave=false:update-dispersion=0.9:update-fraction=0.5:update-method=subdata: FPS: 70
+[terrain] duration=5: FPS: 112 FrameTime: 8.985 ms
+# glmark2-es2-drm 2023.01 (Debian), --off-screen 1280x720, one process per scene (conformance/glmark/run.sh)

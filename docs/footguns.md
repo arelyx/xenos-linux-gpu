@@ -21,6 +21,8 @@ Things that cost us hours. Most are obvious in hindsight.
 - **Ubuntu's ppc64 cross GCC defaults to POWER7.** Instant SIGILL.
 - **`-mcpu=cell` emits `ldbrx`/`stdbrx`**, which Xenon lacks. It crashed rarely enough (64-bit byte swaps) to look like a GPU problem.
 - **GCC auto-vectorises integer code with AltiVec instructions VMX128 doesn't have** (`vmulouh`). dEQP's `ivec4` multiply tests died with SIGILL. Use `-mno-altivec`. pixman needs `PIXMAN_DISABLE=vmx`.
+- **libjpeg-turbo picks its AltiVec code** and dies with SIGILL on an instruction VMX128 lacks (glmark2's terrain scene). `JSIMD_FORCENONE=1` turns its SIMD off.
+- **ir2 has fixed-size arrays without bounds checks.** A shader bigger than about 384 instructions overflowed them and hung the GPU. Mesa patch 0034 sizes them for Xenos and checks.
 - **The kernel didn't advertise AltiVec at all** before our patch, so libLLVM (pulled in by Mesa's swrast) died at the first vector instruction.
 - **A release build turns compiler aborts into GPU hangs.** ir2 (the a2xx shader compiler) reports unsupported shaders with `assert`. With `-Db_ndebug=true` the asserts vanish, the half-compiled shader reaches the GPU, and Xenos wedges until a power cycle. In the first full dEQP run after switching to release, a `tmp_array` case that used to crash hung the GPU instead. ir2's sources now keep their asserts.
 - **Mesa's meson cross file is read at configure time.** Changing `c_args` needs `meson setup --wipe`, and the wipe re-detects libglvnd in the sysroot: Mesa then builds `libEGL_mesa.so` instead of `libEGL.so`, the old `libEGL.so` stays installed, and the next change to a shared struct crashes every program in `eglInitialize`. Configure with `-Dglvnd=disabled`.

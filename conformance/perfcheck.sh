@@ -35,8 +35,9 @@ bad = 0
 for k in b:
     if k not in n: print(f'{k:28} missing'); bad += 1; continue
     r = n[k] / b[k]
-    flag = '  SLOWER' if r < 0.93 else ('  faster' if r > 1.07 else '')
-    bad += r < 0.93
+    tol = 0.85 if k == '-putimage500' else 0.93   # putimage500 varies 167-182 between runs
+    flag = '  SLOWER' if r < tol else ('  faster' if r > 1.07 else '')
+    bad += r < tol
     print(f'{k:28} {abs(b[k]):>12.1f} -> {abs(n[k]):>12.1f}  x{r:.2f}{flag}')
 ok = any(l.startswith('xcopytest') and 'PASS' in l for l in open(sys.argv[2]))
 print('xcopytest', 'PASS' if ok else 'FAIL')

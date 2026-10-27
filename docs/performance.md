@@ -74,6 +74,32 @@ The 1-in-20 sample passed after rounds 3 and 4; the full run (17,165 cases, now 
 - **Order-dependent failures: stale texture cache.** Some cases passed alone and failed after others in the same process: four `fbo.render` cases, and about 10 texture and `uniform_api` cases when readback went through the CPU. Waiting for the whole GPU before every CPU map hid most of them. We first suspected Mesa's per-buffer fence tracking. An 8-second reproducer (261 `uniform_api` render cases, 5 failing) ruled that out: sleeping 2 ms before the map didn't help, while flushing pending work, with or without waiting, did. Every failing case samples a cube map, a linear texture the CPU writes into a buffer recycled from an earlier case. The cause was the cache invalidate before each draw: the all-of-DRAM form doesn't reliably reach the texture cache. Draws now invalidate exact ranges, as libxenon does: vertex and index buffers every draw, a texture or restored render target only after the CPU wrote it or it got a new buffer (resolves already invalidate their destination). The whole-GPU wait is gone. full7: 98.3%, the four `fbo.render` cases fixed, no hangs. The first version invalidated the whole framebuffer at every restore and made `comppixwin500` 30 times slower; `conformance/perfcheck.sh` caught it.
 - **One flaky case.** `fbo.render.resize.tex2d_bgra` failed in two group runs and passes alone and when its 100-case batch is replayed. Open.
 
+## GL applications: glmark2
+
+glmark2-es2 (Debian's 2023.01, `glmark2-es2-drm --off-screen`, 1280x720), each scene in its own process for 5 seconds (`conformance/glmark/run.sh`, which records a hang and power-cycles). Results in `conformance/results/glmark2-2026-10-26.txt`. 31 of 32 default scenes run; refract needs a depth texture render target, which Xenos doesn't offer here, and fails cleanly.
+
+| scene | FPS |
+|---|---:|
+| build (VBO) | 928 |
+| texture (nearest/linear/mipmap) | 848-857 |
+| shading (gouraud to cel) | 762-865 |
+| bump | 727-915 |
+| conditionals, function, loop | 625-869 |
+| jellyfish | 503 |
+| effect2d (3x3 / 5x5 kernel) | 462 / 223 |
+| shadow | 245 |
+| ideas | 239 |
+| buffer (map / subdata / interleaved map) | 71 / 70 / 151 |
+| desktop (blur / shadow) | 133 / 341 |
+| terrain | 112 |
+
+The first run found two bugs:
+
+- **glBufferSubData at 24 fps.** Updating a buffer the GPU still used made freedreno shadow it: a new buffer, with everything outside the update copied over. Xenos has no GPU buffer copy, so the CPU did that copy, reading back through the write-combined mapping. Mesa now waits for the GPU instead on Xenos: 70 fps, and the buffer scenes are bound by glmark2's own CPU work.
+- **terrain hung the GPU.** Its fragment shader is larger than ir2's fixed arrays (0x300 instructions, 384 scheduled slots and words), which had no bounds checks. ir2 wrote past them and the shader that came out wedged the GPU. With `_FORTIFY_SOURCE` the final `memcpy` sometimes aborted instead. The arrays are now sized for Xenos's 2048 instructions per stage, with asserts where entries are added: 112 fps.
+
+terrain also needs `JSIMD_FORCENONE=1`: libjpeg-turbo's AltiVec code uses instructions VMX128 doesn't have (SIGILL).
+
 ## Where the time goes now
 
 Measured after the texture cache fix (26 October evening).

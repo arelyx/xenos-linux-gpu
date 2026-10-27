@@ -1,0 +1,189 @@
+From ba92f22d6eaa6650c8633da1f38d9f612eb25cf9 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 17:52:23 -0700
+Subject: [PATCH 34/34] freedreno/a2xx: room for Xenos-sized shaders in ir2,
+ with bounds checks
+
+ir2 kept 0x300 instructions, 0x180 scheduled slots and 384 CF/ALU words in
+fixed arrays without checks. glmark2's terrain fragment shader is larger:
+ir2 wrote past the arrays and the result hung the GPU (or _FORTIFY_SOURCE
+caught the memcpy). Xenos has 2048 instruction slots per stage
+(SQ_INST_STORE_MANAGMENT 0x00010800), so size the arrays for that, assert
+where entries are added (ir2 keeps its asserts in release builds), and
+allocate the now ~300 KB context on the heap. terrain: 112 fps.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2.c      | 29 +++++++++++--------
+ .../drivers/freedreno/a2xx/ir2_assemble.c     |  5 ++--
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  |  3 ++
+ .../drivers/freedreno/a2xx/ir2_private.h      | 12 +++++---
+ 4 files changed, 31 insertions(+), 18 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 7c36d6e..490ecf6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -179,6 +179,7 @@ scalarize_case1(struct ir2_context *ctx, struct ir2_instr *instr, bool order)
+    if (!sched)
+       return false;
+ 
++   assert(ctx->instr_count < IR2_MAX_INSTR);
+    ins = &ctx->instr[idx = ctx->instr_count++];
+    ins->idx = idx;
+    ins->type = IR2_ALU;
+@@ -389,6 +390,7 @@ schedule_instrs(struct ir2_context *ctx)
+          ra_reg(ctx, &ctx->input[idx], idx, false, 0);
+ 
+    for (;;) {
++      assert(ctx->instr_sched_count + 1 < IR2_MAX_SCHED);
+       sched = &ctx->instr_sched[ctx->instr_sched_count++];
+       block_idx = sched_next(ctx, sched);
+       if (block_idx < 0)
+@@ -403,6 +405,7 @@ schedule_instrs(struct ir2_context *ctx)
+       if (instr && instr->type == IR2_FETCH && instr->fetch.opc == TEX_FETCH &&
+           instr->src_count == 2) {
+          /* generate the SET_LOD instruction */
++         assert(ctx->instr_count < IR2_MAX_INSTR);
+          tex_lod = &ctx->instr[ctx->instr_count++];
+          tex_lod->type = IR2_FETCH;
+          tex_lod->block_idx = instr->block_idx;
+@@ -429,34 +432,36 @@ void
+ ir2_compile(struct fd2_shader_stateobj *so, unsigned variant,
+             struct fd2_shader_stateobj *fp)
+ {
+-   struct ir2_context ctx = {};
++   struct ir2_context *ctx = calloc(1, sizeof(*ctx));   /* about 300 KB */
++   assert(ctx);
+    bool binning = !fp && so->type == MESA_SHADER_VERTEX;
+ 
+    if (fp)
+       so->variant[variant].f = fp->variant[0].f;
+    so->variant[variant].binning = binning;
+ 
+-   ctx.so = so;
+-   ctx.info = &so->variant[variant].info;
+-   ctx.f = &so->variant[variant].f;
+-   ctx.tex_mag_switchover = so->variant[variant].tex_mag_switchover;
+-   ctx.info->max_reg = -1;
++   ctx->so = so;
++   ctx->info = &so->variant[variant].info;
++   ctx->f = &so->variant[variant].f;
++   ctx->tex_mag_switchover = so->variant[variant].tex_mag_switchover;
++   ctx->info->max_reg = -1;
+ 
+    /* convert nir to internal representation */
+-   ir2_nir_compile(&ctx, binning);
++   ir2_nir_compile(ctx, binning);
+ 
+    /* copy propagate srcs */
+-   cp_src(&ctx);
++   cp_src(ctx);
+ 
+    /* get ref_counts and kill non-needed instructions */
+-   ra_count_refs(&ctx);
++   ra_count_refs(ctx);
+ 
+    /* remove movs used to write outputs */
+-   cp_export(&ctx);
++   cp_export(ctx);
+ 
+    /* instruction order.. and vector->scalar conversions */
+-   schedule_instrs(&ctx);
++   schedule_instrs(ctx);
+ 
+    /* finally, assemble to bitcode */
+-   assemble(&ctx, binning);
++   assemble(ctx, binning);
++   free(ctx);
+ }
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index bc94b61..3d301f3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -357,8 +357,8 @@ assemble(struct ir2_context *ctx, bool binning)
+    /* hw seems to have a limit of 384 (num_cf/2+num_instr <= 384)
+     * address is 9 bits so could it be 512 ?
+     */
+-   instr_cf_t cfs[384];
+-   instr_t bytecode[384], bc;
++   instr_cf_t cfs[IR2_MAX_SCHED];
++   instr_t bytecode[IR2_MAX_SCHED], bc;
+    unsigned block_addr[128];
+    unsigned num_cf = 0;
+ 
+@@ -501,6 +501,7 @@ assemble(struct ir2_context *ctx, bool binning)
+ 
+       need_sync = false;
+       exec.count += 1;
++      assert(i < ARRAY_SIZE(bytecode));
+       bytecode[i++] = bc;
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 4376670..2c67e89 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -272,6 +272,7 @@ set_legacy_index(struct ir2_context *ctx, nir_legacy_dest dst,
+    struct ir2_reg *reg = &instr->ssa;
+ 
+    if (dst.is_ssa) {
++      assert(dst.ssa->index < ARRAY_SIZE(ctx->ssa_map));
+       ctx->ssa_map[dst.ssa->index] = instr->idx;
+    } else {
+       reg = &ctx->reg[dst.reg.handle->index];
+@@ -293,6 +294,7 @@ ir2_instr_create(struct ir2_context *ctx, int type)
+ {
+    struct ir2_instr *instr;
+ 
++   assert(ctx->instr_count < IR2_MAX_INSTR);
+    instr = &ctx->instr[ctx->instr_count++];
+    instr->idx = ctx->instr_count - 1;
+    instr->type = type;
+@@ -367,6 +369,7 @@ instr_create_alu_reg(struct ir2_context *ctx, nir_op opcode, uint8_t write_mask,
+    struct ir2_instr *instr;
+    struct ir2_reg *reg;
+ 
++   assert(share_reg || ctx->reg_count < ARRAY_SIZE(ctx->reg));
+    reg = share_reg ? share_reg->reg : &ctx->reg[ctx->reg_count++];
+    reg->ncomp = MAX2(reg->ncomp, util_logbase2(write_mask) + 1);
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index c197b7f..6935875 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -142,7 +142,7 @@ struct ir2_context {
+    struct ir2_src position;
+ 
+    /* to translate SSA ids to instruction ids */
+-   int16_t ssa_map[1024];
++   int16_t ssa_map[4096];
+ 
+    struct ir2_shader_info *info;
+    struct ir2_frag_linkage *f;
+@@ -158,13 +158,17 @@ struct ir2_context {
+    struct ir2_reg input[16 + 1]; /* 16 + param */
+ 
+    /* non-ssa regs */
+-   struct ir2_reg reg[1024];
++   struct ir2_reg reg[4096];   /* indexed by the SSA index of NIR register declarations */
+    unsigned reg_count;
+ 
+-   struct ir2_instr instr[0x300];
++   /* Xenos has room for 2048 instructions per stage (SQ_INST_STORE_MANAGMENT
++    * 0x00010800); a20x needs far less. Sizes are checked where entries are added. */
++#define IR2_MAX_INSTR 0x800
++#define IR2_MAX_SCHED 0x400
++   struct ir2_instr instr[IR2_MAX_INSTR];
+    unsigned instr_count;
+ 
+-   struct ir2_sched_instr instr_sched[0x180];
++   struct ir2_sched_instr instr_sched[IR2_MAX_SCHED];
+    unsigned instr_sched_count;
+ };
+ 
+-- 
+2.53.0
+

@@ -15,9 +15,9 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | Kernel | Linux 6.18.58 + Free60 xenon patch, netbooted by Xell, Debian unstable ppc64 on NFS |
 | GPU driver | `xegpu.ko`: CP microcode and ring, fences on interrupts, boot-time contiguous pool, KMS display, msm UAPI subset with a command checker |
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 only |
-| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 98.3% of executed cases pass, no GPU hangs (`conformance/results/full7-report.txt`; 98.0% before the performance work). Cube maps are most of the remaining failures |
+| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 98.3% of executed cases pass, no GPU hangs (`conformance/results/full8-report.txt`; 98.0% before the performance work). Cube maps are most of the remaining failures |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
-| Performance | Four rounds ([docs/performance.md](docs/performance.md)): fills, text, composites, large copies, scrolls and uploads beat CPU rendering (rect10 2.9M/s vs 1.7M, aa10text 839k vs 290k, scroll500 5,480 vs 904); tiny copies, tiny uploads and readback still lose |
+| Performance | Four rounds ([docs/performance.md](docs/performance.md)): fills, text, composites, large copies, scrolls and uploads beat CPU rendering (rect10 2.9M/s vs 1.7M, aa10text 839k vs 290k, scroll500 5,480 vs 904); tiny copies, tiny uploads and readback still lose. glmark2-es2: 31 of 32 scenes run, 112-928 FPS at 1280x720 |
 | Not done | Cube maps, ETC1, state re-emission per batch, Vulkan (never) |
 
 Nothing here writes to the console's NAND. The only change to the softmod is one byte in a file on the hard disk (see [docs/setup.md](docs/setup.md)).
