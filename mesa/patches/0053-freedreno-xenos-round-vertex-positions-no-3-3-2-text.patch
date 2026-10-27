@@ -1,0 +1,73 @@
+From bfde50dac133df73456e2fc88c4a34a3f0c78b4e Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 11:47:09 -0700
+Subject: [PATCH] freedreno/xenos: round vertex positions, no 3-3-2 textures,
+ no 3D render targets
+
+- PA_SU_VTX_CNTL.ROUND_MODE = ROUND: positions were truncated to the 1/16
+  grid, which shifted texture coordinates enough that linear filtering at
+  texel centers picked up a few percent of the neighbor (piglit texwrap).
+- R3G3B2/B2G3R3 aren't sampler formats (texsubimage read them back wrong);
+  st picks a wider format.
+- 3D textures can't be render targets (they are linear, resolves write the
+  tiled layout), so st uploads and reads them on the CPU.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/fd2_rasterizer.c        |  5 +++++
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c    | 14 ++++++++++++--
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c b/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
+index 35917ad..1133f8e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_rasterizer.c
+@@ -51,6 +51,11 @@ fd2_rasterizer_state_create(struct pipe_context *pctx,
+       A2XX_PA_SU_VTX_CNTL_PIX_CENTER(cso->half_pixel_center ? PIXCENTER_OGL
+                                                             : PIXCENTER_D3D) |
+       A2XX_PA_SU_VTX_CNTL_QUANT_MODE(ONE_SIXTEENTH);
++   /* Xenos: round vertex positions to the 1/16 grid instead of truncating
++    * them (truncation shifted texture coordinates enough to bleed neighbor
++    * texels into linear filtering at texel centers: piglit texwrap) */
++   if (fd2_xenos)
++      so->pa_su_vtx_cntl |= A2XX_PA_SU_VTX_CNTL_ROUND_MODE(ROUND);
+ 
+    so->pa_su_point_size = A2XX_PA_SU_POINT_SIZE_HEIGHT(cso->point_size / 2) |
+                           A2XX_PA_SU_POINT_SIZE_WIDTH(cso->point_size / 2);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 212c162..f767e40 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -50,6 +50,12 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
+       return false;
+ 
++   /* Xenos: 3D textures are linear and resolves write the tiled layout, so
++    * they can't be rendered to (st then uploads on the CPU instead of
++    * blitting into them) */
++   if (is_xenos(fd_screen(pscreen)) && target == PIPE_TEXTURE_3D)
++      usage &= ~(PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL);
++
+    if ((usage & PIPE_BIND_RENDER_TARGET) &&
+        (is_xenos(fd_screen(pscreen)) ? xenos_color_format_ok(format)
+                                      : fd2_pipe2color(format) != (enum a2xx_colorformatx) ~0)) {
+@@ -68,8 +74,12 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+       /* the only npot blocksize supported texture format is R32G32B32_FLOAT */
+       /* (Xenos: k_32_32_32_FLOAT is a vertex format only; sampling it wedged the
+        * GPU in piglit draw-pixels) */
+-      if (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+-          (format == PIPE_FORMAT_R32G32B32_FLOAT && !is_xenos(fd_screen(pscreen))))
++      /* Xenos: 3-3-2 textures sampled wrong (piglit texsubimage); st falls
++       * back to a wider format */
++      bool blocked = is_xenos(fd_screen(pscreen)) &&
++                     (format == PIPE_FORMAT_R3G3B2_UNORM || format == PIPE_FORMAT_B2G3R3_UNORM);
++      if (!blocked && (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
++          (format == PIPE_FORMAT_R32G32B32_FLOAT && !is_xenos(fd_screen(pscreen)))))
+          retval |= usage & PIPE_BIND_SAMPLER_VIEW;
+    }
+ 
+-- 
+2.53.0
+
