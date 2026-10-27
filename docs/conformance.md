@@ -76,3 +76,6 @@ First pass (`results/piglit-gl20-1-summary.txt`): 763 pass, 307 fail, 63 crash, 
 - `tex-miplevel-selection`: all variants.
 - Crashes: mostly ir2 aborting on texture ops it doesn't implement (`txf`).
 - Hangs: `arb_point_sprite-checkerboard` and `-mipmap`.
+
+Third pass (gl20-3, after Mesa 0043-0045: varying count, point sprite exports, derivatives, texelFetch): 802 pass, 324 fail, 9 crash, 0 hangs, 1,471 skip: **70.4%** of executed tests. dEQP full15 after the same changes: 99.8% (two `texture.size` cases out of GPU pool memory this time, which come and go between runs).
+
