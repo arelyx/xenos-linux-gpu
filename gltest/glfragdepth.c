@@ -36,7 +36,7 @@ int main(int argc, char **argv)
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, W, W);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, c);
 	glGenRenderbuffers(1, &d); glBindRenderbuffer(GL_RENDERBUFFER, d);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, W);
+	glRenderbufferStorage(GL_RENDERBUFFER, getenv("DS") ? GL_DEPTH24_STENCIL8 : GL_DEPTH_COMPONENT24, W, W);   /* DS=1: packed depth-stencil */
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, d);
 	glViewport(0, 0, W, W);
 	glClearColor(0, 0, 0, 1); glClearDepth(1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

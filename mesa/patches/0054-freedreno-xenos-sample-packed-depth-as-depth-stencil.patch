@@ -1,0 +1,173 @@
+From f31782a74432e2c5af9723fba8a22bfdad5ab0d6 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:38:49 -0700
+Subject: [PATCH] freedreno/xenos: sample packed depth as depth, stencil blits
+ on the CPU
+
+- Z24_UNORM_S8_UINT sampled as an integer: on big endian its first
+  non-void channel is the stencil, which set NUM_FORMAT_INT, so sampled
+  depth saturated to 1.0. The depth channel decides for depth formats.
+  Fixes depth blits, copies and depth textures of packed depth/stencil.
+- Stencil blits: Xenos has no stencil export and no integer sampling, so
+  u_blitter's per-bit fallback can't read the source. Copy the stencil
+  bytes on the CPU through the (converting) transfers, after the GPU part
+  of a depth+stencil blit.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_util.c |   5 +-
+ .../drivers/freedreno/freedreno_blitter.c     | 106 ++++++++++++++++++
+ 2 files changed, 110 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_util.c b/src/gallium/drivers/freedreno/a2xx/fd2_util.c
+index cc2e93b..92c5500 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_util.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_util.c
+@@ -52,7 +52,10 @@ pipe2surface(enum pipe_format format, struct surface_format *fmt)
+    if (desc->channel[i].type == UTIL_FORMAT_TYPE_SIGNED ||
+        desc->channel[i].type == UTIL_FORMAT_TYPE_FIXED)
+       fmt->sign = SQ_TEX_SIGN_SIGNED;
+-   if (!desc->channel[i].normalized)
++   /* packed depth/stencil: the depth channel decides (on big endian the
++    * first channel of Z24_UNORM_S8_UINT is the stencil, which made sampled
++    * depth an integer, 1.0 after saturation) */
++   if (!desc->channel[i].normalized && !util_format_has_depth(desc))
+       fmt->num_format = SQ_TEX_NUM_FORMAT_INT;
+    if (desc->channel[i].type == UTIL_FORMAT_TYPE_FIXED)
+       fmt->exp_adjust = -16;
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index 89432c3..d229ba4 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -9,6 +9,8 @@
+ #include "util/u_blitter.h"
+ #include "util/u_resource.h"
+ #include "util/u_surface.h"
++#include "util/u_inlines.h"
++#include "util/box.h"
+ 
+ #include "nir.h"
+ #include "nir_builder.h"
+@@ -439,6 +441,92 @@ fd_blit_stencil_fallback(struct fd_context *ctx, const struct pipe_blit_info *in
+       info->scissor_enable ? &info->scissor : NULL);
+ }
+ 
++/* Xenos: no stencil export and no integer sampling, so u_blitter's per-bit
++ * stencil fallback can't read the source; copy the stencil bytes on the CPU
++ * instead (the transfers convert to and from Mesa's Z24S8). Nearest
++ * sampling, flips and the scissor as in a GL blit. */
++static bool
++xenos_blit_stencil_cpu(struct fd_context *ctx, const struct pipe_blit_info *info)
++   assert_dt
++{
++   struct pipe_context *pctx = &ctx->base;
++   enum pipe_format sf = info->src.resource->format, df = info->dst.resource->format;
++   bool s_s8 = sf == PIPE_FORMAT_S8_UINT, d_s8 = df == PIPE_FORMAT_S8_UINT;
++   if (!(s_s8 || sf == PIPE_FORMAT_Z24_UNORM_S8_UINT || sf == PIPE_FORMAT_X24S8_UINT) ||
++       !(d_s8 || df == PIPE_FORMAT_Z24_UNORM_S8_UINT || df == PIPE_FORMAT_X24S8_UINT) ||
++       info->src.box.depth != 1 || info->dst.box.depth != 1)
++      return false;
++
++   struct pipe_box sbox = info->src.box, dbox = info->dst.box;
++   u_box_2d(MIN2(sbox.x, sbox.x + sbox.width), MIN2(sbox.y, sbox.y + sbox.height),
++            abs(sbox.width), abs(sbox.height), &sbox);
++   sbox.z = info->src.box.z;
++   u_box_2d(MIN2(dbox.x, dbox.x + dbox.width), MIN2(dbox.y, dbox.y + dbox.height),
++            abs(dbox.width), abs(dbox.height), &dbox);
++   dbox.z = info->dst.box.z;
++   /* keep the source box inside the level */
++   unsigned sw = u_minify(info->src.resource->width0, info->src.level);
++   unsigned sh = u_minify(info->src.resource->height0, info->src.level);
++   struct pipe_box smap = sbox;
++   int sx0 = MAX2(smap.x, 0), sy0 = MAX2(smap.y, 0);
++   int sx1 = MIN2(smap.x + smap.width, (int)sw), sy1 = MIN2(smap.y + smap.height, (int)sh);
++   if (sx1 <= sx0 || sy1 <= sy0 || !dbox.width || !dbox.height)
++      return true;
++   u_box_2d(sx0, sy0, sx1 - sx0, sy1 - sy0, &smap);
++   smap.z = sbox.z;
++
++   struct pipe_transfer *strans, *dtrans;
++   uint8_t *src = pipe_texture_map(pctx, info->src.resource, info->src.level, smap.z,
++                                   PIPE_MAP_READ, smap.x, smap.y, smap.width, smap.height, &strans);
++   if (!src)
++      return false;
++   /* the blit may read and write the same resource: copy the source out */
++   uint8_t *stmp = malloc((size_t)smap.width * smap.height);
++   for (int y = 0; y < smap.height; y++)
++      for (int x = 0; x < smap.width; x++)
++         stmp[y * smap.width + x] = s_s8 ? src[y * strans->stride + x] :
++            (uint8_t)(*(uint32_t *)(src + y * strans->stride + x * 4) >> 24);
++   pipe_texture_unmap(pctx, strans);
++
++   uint8_t *dst = pipe_texture_map(pctx, info->dst.resource, info->dst.level, dbox.z,
++                                   PIPE_MAP_READ | PIPE_MAP_WRITE,
++                                   dbox.x, dbox.y, dbox.width, dbox.height, &dtrans);
++   if (!dst) {
++      free(stmp);
++      return false;
++   }
++   bool flip_x = (info->src.box.width < 0) != (info->dst.box.width < 0);
++   bool flip_y = (info->src.box.height < 0) != (info->dst.box.height < 0);
++   for (int y = 0; y < dbox.height; y++) {
++      int py = dbox.y + y;
++      if (info->scissor_enable && (py < (int)info->scissor.miny || py >= (int)info->scissor.maxy))
++         continue;
++      int fy = flip_y ? dbox.height - 1 - y : y;
++      int syy = sbox.y + (int)((fy + 0.5f) * sbox.height / dbox.height) - smap.y;
++      if (syy < 0 || syy >= smap.height)
++         continue;
++      for (int x = 0; x < dbox.width; x++) {
++         int px = dbox.x + x;
++         if (info->scissor_enable && (px < (int)info->scissor.minx || px >= (int)info->scissor.maxx))
++            continue;
++         int fx = flip_x ? dbox.width - 1 - x : x;
++         int sxx = sbox.x + (int)((fx + 0.5f) * sbox.width / dbox.width) - smap.x;
++         if (sxx < 0 || sxx >= smap.width)
++            continue;
++         uint8_t v = stmp[syy * smap.width + sxx];
++         if (d_s8) {
++            dst[y * dtrans->stride + x] = v;
++         } else {
++            uint32_t *w = (uint32_t *)(dst + y * dtrans->stride + x * 4);
++            *w = (*w & 0x00ffffff) | (uint32_t)v << 24;
++         }
++      }
++   }
++   pipe_texture_unmap(pctx, dtrans);
++   free(stmp);
++   return true;
++}
++
+ /**
+  * Optimal hardware path for blitting pixels.
+  * Scaling, format conversion, up- and downsampling (resolve) are allowed.
+@@ -455,6 +543,24 @@ fd_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
+    if (ctx->blit && ctx->blit(ctx, &info))
+       return true;
+ 
++   /* Xenos: stencil on the CPU after the GPU part (a full-surface depth
++    * blit doesn't restore the destination, and its resolve would write
++    * stale stencil over the CPU's) */
++   if ((info.mask & PIPE_MASK_S) && is_xenos(ctx->screen)) {
++      struct pipe_blit_info zs = info;
++      zs.mask &= ~PIPE_MASK_S;
++      if (zs.mask && !(util_blitter_is_blit_supported(ctx->blitter, &zs) &&
++                       fd_blitter_blit(ctx, &zs)))
++         return false;
++      if (xenos_blit_stencil_cpu(ctx, &info))
++         return true;
++      if (!zs.mask) {
++         fd_blit_stencil_fallback(ctx, &info);
++         return true;
++      }
++      info.mask = PIPE_MASK_S;
++   }
++
+    if (info.mask & PIPE_MASK_S) {
+       fd_blit_stencil_fallback(ctx, &info);
+       info.mask &= ~PIPE_MASK_S;
+-- 
+2.53.0
+

@@ -27,7 +27,26 @@ int main(int argc, char **argv)
 	for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) dv[y * W + x] = (x + 0.5f) / W;
 	GLuint t, fbo, c;
 	glGenTextures(1, &t); glBindTexture(tgt, t);
-	glTexImage2D(tgt, 0, argc > 2 ? (int)strtol(argv[2], 0, 0) : GL_DEPTH_COMPONENT24, W, H, 0, getenv("LUM") ? GL_LUMINANCE : GL_DEPTH_COMPONENT, GL_FLOAT, dv);
+	GLint ifmt = argc > 2 ? (int)strtol(argv[2], 0, 0) : GL_DEPTH_COMPONENT24;
+	if (ifmt == GL_DEPTH24_STENCIL8)
+		glTexImage2D(tgt, 0, ifmt, W, H, 0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+	else
+		glTexImage2D(tgt, 0, ifmt, W, H, 0, getenv("LUM") ? GL_LUMINANCE : GL_DEPTH_COMPONENT, GL_FLOAT, dv);
+	if (getenv("RENDER") || ifmt == GL_DEPTH24_STENCIL8) {   /* write depth = x/W with the GPU instead */
+		GLuint rf;
+		glGenFramebuffers(1, &rf); glBindFramebuffer(GL_FRAMEBUFFER, rf);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, tgt, t, 0);
+		glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+		glViewport(0, 0, W, H);
+		glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS);
+		glBegin(GL_QUADS); glVertex3f(-1, -1, -1); glVertex3f(1, -1, 1); glVertex3f(1, 1, 1); glVertex3f(-1, 1, -1); glEnd();
+		glDisable(GL_DEPTH_TEST);
+		static float rb[256];
+		glReadPixels(0, 1, W, 1, GL_DEPTH_COMPONENT, GL_FLOAT, rb);
+		printf("readback after render: x0 %.3f, x%d %.3f\n", rb[0], W / 2, rb[W / 2]);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glFinish();
+	}
 	glTexParameteri(tgt, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(tgt, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(tgt, GL_DEPTH_TEXTURE_MODE, GL_LUMINANCE);

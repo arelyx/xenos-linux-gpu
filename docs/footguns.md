@@ -54,3 +54,7 @@ Things that cost us hours. Most are obvious in hindsight.
 - **Apt build-dep on the console runs it out of memory** (458 MB). Build in a chroot of the NFS root on the host with qemu-user binfmt.
 - **A desktop session or leftover Xorg runs dEQP out of GPU memory.** GL buffers come from a 48 MB pool, and an Xorg holds its share. Big texture cases then fail with `GL_OUT_OF_MEMORY`. It bit twice: an Xorg left over from a benchmark, then the Xfce session restarted by `perfcheck.sh`. `xperf.sh` stops its Xorg when it finishes, and `gl-ready.sh` stops the session and any Xorg before GL tests.
 - **The Xbox has 458 MB.** dEQP's ETC1 tests run it out of memory and the console stops answering. They're skipped.
+
+## Format descriptions are endian-specific
+
+Mesa's `util_format_description` lists the channels of packed formats in memory order for the host. On big endian the first non-void channel of `Z24_UNORM_S8_UINT` is the 8-bit stencil, not the depth. fd2's `pipe2surface` took the number format from that channel, so packed depth textures were sampled as integers and every depth read 1.0, while `Z24X8_UNORM` (first non-void channel: depth) worked. Look at all channels, or at `util_format_has_depth`, before deciding anything from "the first channel".
