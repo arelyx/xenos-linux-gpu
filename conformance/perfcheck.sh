@@ -1,7 +1,7 @@
 #!/bin/bash
 # perfcheck.sh [baseline] [out]: run x11perf (glamor), glrt and xcopytest on the console and
 # compare against a baseline from an earlier run. Flags any test more than 7% slower.
-# Stops xfce-glamor for the run and starts it again afterwards.
+# Stops the desktop session (icewm-glamor or xfce-glamor) for the run and starts it again afterwards.
 # perfcheck.sh --compare <baseline> <run>: only compare two saved runs.
 here=$(dirname "$0")
 if [ "$1" = --compare ]; then base=$2; out=$3; else
@@ -11,12 +11,12 @@ host=${XBOX_HOST:-10.0.0.206}
 ssh_opts=${XBOX_SSH_OPTS:--i ~/.ssh/lake}
 tests="-rect10 -rect500 -copywinwin10 -copywinwin500 -putimage10 -putimage500 -shmput500 -getimage10 -getimage500 -aa10text -aa24text -comppixwin500 -oddtilerect100 -scroll500"
 ssh $ssh_opts root@$host "
-  restart=0; systemctl is-active -q xfce-glamor && restart=1 && systemctl stop xfce-glamor
+  sess=; for u in icewm-glamor xfce-glamor; do systemctl is-active -q \$u && sess=\$u; done; [ -n \"\$sess\" ] && systemctl stop \$sess
   KEEP_X=1 XENV='$XENV' /opt/deqp/xperf.sh glamor $tests
   echo \"xcopytest \$(DISPLAY=:0 timeout 300 /opt/xegpu/xtest/xcopytest 2>&1 | tail -1)\"
   pkill -x Xorg; sleep 2
   for i in 1 2 3; do LD_LIBRARY_PATH=/opt/mesa-xenos/lib /opt/xegpu/gltest/glrt 64 2000 draw; done | sort -k4 -n | sed -n 2p | sed 's/^/glrt-draw-us /'
-  [ \$restart = 1 ] && systemctl start xfce-glamor
+  [ -n \"\$sess\" ] && systemctl start \$sess
   true" | tee "$out"
 fi
 [ -f "$base" ] || { echo "no baseline $base; save $out as one"; exit 0; }

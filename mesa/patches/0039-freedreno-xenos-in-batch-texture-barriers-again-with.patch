@@ -1,0 +1,85 @@
+From 0f9e2568fe5fcece746dd71bfc1aa8ee22367373 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:34:51 -0700
+Subject: [PATCH] freedreno/xenos: in-batch texture barriers again, without the
+ DEST_BASE flush
+
+The resize hang was the cache flush after the in-batch barrier resolve:
+COHER_STATUS_HOST with DEST_BASE_0_ENA (0x03000100) sometimes never
+completes in the middle of the draw stream. Issued without that bit
+(0x03000000) after the CACHE_FLUSH event, 31 runs of xorg/xresize.c in
+an IceWM session and xcopytest pass (the old form hung 2 of 2 runs), so
+the in-batch barrier is the default again. XENOS_FLUSH_BARRIER=1 makes
+barriers flush the batch.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 21 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index a2d9f17..dd18e61 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -27,11 +27,8 @@
+ #include "fd2_zsa.h"
+ 
+ DEBUG_GET_ONCE_BOOL_OPTION(xenos_full_resolve, "XENOS_FULL_RESOLVE", false)
+-/* The in-batch barrier resolve hangs the GPU in its cache flush wait (COHER_STATUS_HOST
+- * stays busy) when Xfce resizes a window; until that is understood the barrier
+- * flushes the batch, as upstream freedreno does. XENOS_INBATCH_BARRIER=1 brings
+- * the in-batch resolve back (twice the 10x10 copy rate). */
+-DEBUG_GET_ONCE_BOOL_OPTION(xenos_inbatch_barrier, "XENOS_INBATCH_BARRIER", false)
++/* XENOS_FLUSH_BARRIER=1: texture barriers flush the batch, as upstream freedreno does */
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_flush_barrier, "XENOS_FLUSH_BARRIER", false)
+ 
+ static uint32_t
+ fmt2swap(enum pipe_format format)
+@@ -103,6 +100,9 @@ xenos_dirty_rect(struct fd_batch *batch, unsigned *x0, unsigned *y0, unsigned *x
+    xenos_scissor_rect(batch, &batch->max_scissor, x0, y0, x1, y1);
+ }
+ 
++/* set while fd2_xenos_texture_barrier() emits its resolve */
++static bool xenos_in_barrier;
++
+ /* transfer from gmem to system memory (ie. normal RAM) */
+ 
+ static void
+@@ -152,7 +152,12 @@ emit_gmem2mem_surf(struct fd_batch *batch, struct fd_ringbuffer *ring, uint32_t
+       OUT_PKT3(ring, CP_EVENT_WRITE, 1);
+       OUT_RING(ring, CACHE_FLUSH);
+       OUT_PKT0(ring, XENOS_REG_COHER_STATUS_HOST, 1);
+-      OUT_RING(ring, 0x03000100);
++      /* In the middle of the draw stream (texture barrier), the DEST_BASE_0
++       * form (bit 8) sometimes never completes: COHER_STATUS_HOST stayed busy
++       * and the GPU hung when Xfce or IceWM resized a window (xorg/xresize.c,
++       * 2 of 2 runs). Without it, 11 resize runs and xcopytest pass; the
++       * CACHE_FLUSH event above and the cache invalidate cover the data. */
++      OUT_RING(ring, xenos_in_barrier ? 0x03000000 : 0x03000100);
+       OUT_PKT0(ring, XENOS_REG_COHER_SIZE_HOST, 2);
+       OUT_RING(ring, fd_resource_slice(rsc, psurf->level)->size0);
+       OUT_RELOC(ring, rsc->bo, offset, 0, 0);   /* COHER_BASE_HOST */
+@@ -929,7 +934,7 @@ fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
+    struct fd_ringbuffer *ring;
+    unsigned rx0, ry0, rx1, ry1;
+ 
+-   if (!batch || !debug_get_option_xenos_inbatch_barrier()) {
++   if (!batch || debug_get_option_xenos_flush_barrier()) {
+       pctx->flush(pctx, NULL, 0);
+       return;
+    }
+@@ -993,7 +998,9 @@ fd2_xenos_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
+    OUT_RING(ring, A2XX_RB_MODECONTROL_EDRAM_MODE(EDRAM_COPY));
+ 
+    /* the only color buffer of a batch without depth is at EDRAM offset 0 */
++   xenos_in_barrier = true;
+    emit_gmem2mem_surf(batch, ring, 0, &pfb->cbufs[0]);
++   xenos_in_barrier = false;
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_RB_MODECONTROL));
+-- 
+2.53.0
+

@@ -129,6 +129,10 @@ A Python `mmap` slice did byte loads from the register BAR and froze the console
 
 In the linear layout, each mip level's rows are aligned to 256 bytes (Xenia's `texture_util`, `kTextureLinearRowAlignmentBytes`). freedreno's a2xx layout aligns rows to 32 texels for both, which is right for tiled textures only. Cube maps and textures in formats that can't be render targets (L8, A8, LA88, 16-bit float) stayed linear, and with mipmaps they sampled the wrong texels: about 240 dEQP cases. Mesa now tiles every 2D and cube texture except staging and compressed ones, and the CPU (de)tiles on map, as for render targets.
 
+### 24. Don't use the destination-base cache flush in the middle of a draw stream
+
+After a resolve, libxenon flushes with `COHER_STATUS_HOST = 0x03000100` (bit 8, DEST_BASE_0_ENA) and waits for the busy bit to clear. At the end of a batch that works. Between draws of the same batch it sometimes never clears, and the `WAIT_REG_MEM` on it hangs the GPU for good. `0x03000000` (texture and vertex cache only), after a `CACHE_FLUSH` event, completes and gives later draws the resolved texels.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
