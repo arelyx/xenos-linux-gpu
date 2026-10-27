@@ -1,0 +1,73 @@
+From 5390c62777af02b844b19bb9e15e47e315e52d59 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 18:34:16 -0700
+Subject: [PATCH] freedreno/xenos: tile textures and cube maps
+
+Only render-target-capable 2D textures were tiled. Cube maps and textures
+in non-renderable formats (L8, A8, LA88, 16-bit float) stayed linear, and
+Xenos lays out linear mips differently (rows aligned to 256 bytes, per
+Xenia's texture_util) from fd2's layout: POT cubes and mipmapped
+non-renderable textures sampled the wrong texels. The tiled layout already
+matches the hardware, and the CPU (de)tiles on map, so tile 2D and cube
+sampler textures too (not staging ones, not compressed formats).
+
+dEQP-GLES2: 242 cases fixed, none regressed (98.3% -> 99.7%).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_resource.c  | 12 +++++++++++-
+ src/gallium/drivers/freedreno/freedreno_resource.c |  5 +++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+index 3f709b1..f6933c3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "fd2_resource.h"
++#include "fd2_emit.h"
+ #include "freedreno_screen.h"
+ 
+ uint32_t
+@@ -48,8 +49,17 @@ fd2_tile_mode(const struct pipe_resource *tmpl)
+    /* disable tiling for cube maps, freedreno uses a 2D array for the staging
+     * texture, (a2xx supports 2D arrays but it is not implemented)
+     */
+-   if (tmpl->target == PIPE_TEXTURE_CUBE)
++   if (tmpl->target == PIPE_TEXTURE_CUBE && !fd2_xenos)
+       return 0;
++   /* Xenos: cube faces are (de)tiled on the CPU like 2D textures, and the
++    * linear layout's mip pitches didn't match what the sampler reads (POT
++    * cubes with mipmaps failed in dEQP) */
++   /* Xenos: textures too. Its linear layout aligns mip rows to 256 bytes
++    * (Xenia texture_util), unlike this one; the tiled layout matches. */
++   if (fd2_xenos && (tmpl->bind & PIPE_BIND_SAMPLER_VIEW) && tmpl->usage != PIPE_USAGE_STAGING &&
++       (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE) &&
++       !util_format_is_compressed(tmpl->format))
++      return 1;
+    /* we can enable tiling for any resource we can render to */
+    return (tmpl->bind & PIPE_BIND_RENDER_TARGET) ? 1 : 0;
+ }
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 65ae4ca..f612c9c 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1417,6 +1417,11 @@ get_best_layout(struct fd_screen *screen,
+    if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_RENDER_TARGET) &&
+        tmpl->target != PIPE_BUFFER)
+       return FD_LAYOUT_TILED;
++   /* and textures (fd2_tile_mode) */
++   if (is_xenos(screen) && (tmpl->bind & PIPE_BIND_SAMPLER_VIEW) && tmpl->usage != PIPE_USAGE_STAGING &&
++       (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE) &&
++       !util_format_is_compressed(tmpl->format))
++      return FD_LAYOUT_TILED;
+ 
+    if ((tmpl->target == PIPE_BUFFER) ||
+        (tmpl->target == PIPE_TEXTURE_1D) ||
+-- 
+2.53.0
+

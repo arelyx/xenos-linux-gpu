@@ -35,6 +35,8 @@ Things that cost us hours. Most are obvious in hindsight.
 - **"Invalidate all of DRAM" isn't.** The cache invalidate over all of memory looked like the safe choice and passed every test run on its own. Cases that sampled a CPU-written texture in a recycled buffer then failed only after other cases. Invalidate exact ranges (hardware rule 14).
 - **A whole-GPU wait can hide a cache bug.** Waiting for everything before CPU maps fixed most of those failures, and we spent hours suspecting fence tracking. It worked because the flush put the upload and the draw in separate batches. Sleeping instead of flushing told the two apart in one run.
 
+- **"Only render targets need tiling" was wrong on Xenos.** Linear textures follow a different mip layout (hardware rule 23). Tiling everything fixed about 240 dEQP cases. Tiling staging textures as well broke window copies in `xorg/xcopytest.c` (pixmap copies stayed correct); staging stays linear, and we don't yet know why.
+
 ## Process
 
 - **`pkill -f <pattern>` matches the shell that runs it** when the pattern appears in the command line. We killed our own SSH session and our own harness this way. Match exact process names (`pkill -x xbox-cycle`) or check `/proc/<pid>/cmdline`.

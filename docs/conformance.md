@@ -43,13 +43,20 @@ Per-group tables are in `results/`. A case counts as passing if dEQP reports Pas
 
 ## Known failures
 
-After the performance work (`results/full6-report.txt`, 26 October afternoon): 98.3% of executed cases pass, 49 fixed and 5 regressed compared with full3, no hangs. The regressions are four `fbo.render` cases that fail only after other cases have run in the same process (see "What the full dEQP run caught" in [performance.md](performance.md)) and one 512x512 cube texture that ran out of memory. full7 (`results/full7-report.txt`, same evening) fixed the order-dependent cases: the GPU's all-of-DRAM cache invalidate doesn't reliably reach the texture cache, so draws now invalidate exact ranges (hardware rule 14). 98.3% again, 5 fixed against full6 and no hangs. Its two "regressions" are `GL_OUT_OF_MEMORY` from an Xorg we had left running, which held GL buffers in the GPU pool; both pass on a rerun without it. full8 (`results/full8-report.txt`), after the glmark2 fixes: 98.3%, 3 fixed and 2 changed against full7. `random_teximage2d.cube_7` also failed in full3 and full6 and fails alone, so it passed by luck in full7. The 512x512 RGBA4444 cube passes alone (a `ResourceError` in a long run: memory). The list below is from `results/full3-report.txt` and still applies:
+Latest full run: full9 (`results/full9-report.txt`, 26 October evening), **99.7% of executed cases pass** (17,025 of 17,075), 242 fixed against full8, none regressed, no hangs. The jump came from tiling every 2D and cube texture (hardware rule 23): cube maps and non-renderable formats had been linear, and Xenos lays out linear mips differently from freedreno.
 
-- Cube maps account for most texture failures: `texture.vertex.cube.*` (45), `texture.mipmap.cube.*` (28), cube cases in `texture.specification` and `texture.filtering`. Probably the cube face layout; cube textures are the one texture kind freedreno doesn't tile.
-- `fbo.render` (36): to investigate.
-- Crashes (17) are shader-compiler aborts on very large shaders (`shaders.indexing ... const_write_dynamic_loop_read`, ir2 runs out of its register array) and three `fbo.completeness` float formats.
-- `state_query.integers.implementation_color_read_*` regressed: we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32, and ES2 doesn't list that type.
+History: full3 98.0%. full6 98.3% after the performance work (49 fixed, 5 regressed: four order-dependent `fbo.render` cases and a 512x512 cube out of memory). full7 98.3%: the order-dependent cases were a stale texture cache (hardware rule 14). full8 98.3% after the glmark2 fixes; `random_teximage2d.cube_7` passed by luck in full7.
 
-- Cube-map filtering at texel boundaries on the first face rendered (`texture.filtering.cube.*`).
-- RGBA4444 textures sample like 565.
-- `rasterization.limits.points` (largest point size) fails without hanging.
+What still fails in full9 (50 cases):
+
+| cases | what | notes |
+|---:|---|---|
+| 14 | `fbo.render.recreate_colorbuffer.*` | to investigate |
+| 8 | `shaders.indexing.tmp_array.*` (Crash) | ir2 can't compile dynamically indexed temporary arrays; it aborts instead of hanging the GPU |
+| 6 | `texture.mipmap.2d.projected.*` | projected mipmap level selection |
+| 6 | `texture.size` 2048x2048 mipmapped, 512 cube (ResourceError) | out of GPU pool memory (48 MB) |
+| 5 | `clipping` wide points and lines | |
+| 3 | `uniform_api.random.*` | |
+| 3 | `state_query` read type, max vertex uniform vectors (getfloat) | we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32; ES2 doesn't list it |
+| 2 | `shaders.return.return_in_dynamic_loop_dynamic_*` | |
+| 1 each | `rasterization.limits.points`, `implementation_limits.max_vertex_uniform_vectors`, `clipping.polygon_edge.poly_fan` | |
