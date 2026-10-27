@@ -64,3 +64,15 @@ What still failed in full9 (50 cases; the first row is fixed in full10):
 | 3 | `state_query` read type, max vertex uniform vectors (getfloat) | we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32; ES2 doesn't list it |
 | 2 | `shaders.return.return_in_dynamic_loop_dynamic_*` | |
 | 1 each | `rasterization.limits.points`, `implementation_limits.max_vertex_uniform_vectors`, `clipping.polygon_edge.poly_fan` | |
+
+## Desktop OpenGL: piglit
+
+Since 27 October Mesa is built with desktop GL and GLX; the driver reports OpenGL 2.0 / GLSL 1.20. piglit (Debian's 2026-07 snapshot, installed in the NFS root) is run with `conformance/piglit/piglit-run.py`, which works like `deqp-run.py`: batches over SSH, a GPU check after every test, power cycle on a hang. The list `conformance/piglit/gl20.txt` is the 2,610 tests of piglit's `quick_gl` profile that apply to GL 2.0, GLSL 1.10/1.20 and the extensions the driver advertises (GLX tests excluded; they need an X server).
+
+First pass (`results/piglit-gl20-1-summary.txt`): 763 pass, 307 fail, 63 crash, 2 hang, 1,471 skip; 67.0% of executed tests pass. During the pass four GPU hang classes turned up and were fixed (Mesa 0041, 0042): a pixel shader that exports nothing (depth-only framebuffers), sampling `k_32_32_32_FLOAT`, 1D fetch constants, and the earlier ones that came from those two. Open:
+
+- Depth and stencil read back by the CPU or blitted (most of `ext_packed_depth_stencil`, `arb_depth_texture`, `ext_framebuffer_object`): depth goes to memory as raw EDRAM color data, which round-trips across batches but isn't the depth layout the CPU expects.
+- `varying-packing` and `glsl-max-varyings`: every varying the driver advertises, packed.
+- `tex-miplevel-selection`: all variants.
+- Crashes: mostly ir2 aborting on texture ops it doesn't implement (`txf`).
+- Hangs: `arb_point_sprite-checkerboard` and `-mipmap`.
