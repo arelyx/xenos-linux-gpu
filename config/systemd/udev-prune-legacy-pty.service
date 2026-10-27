@@ -1,0 +1,11 @@
+[Unit]
+Description=Drop udev's records of the 512 legacy BSD ptys (64 KB tmpfs pages: 16 MB of RAM)
+After=systemd-udev-trigger.service systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/bin/udevadm settle --timeout=30
+ExecStart=/usr/bin/find /run/udev/data ( -name c2:* -o -name c3:* ) -delete
+
+[Install]
+WantedBy=multi-user.target

@@ -113,3 +113,15 @@ ninja deqp-gles2
 ```
 
 `-DDE_CPU=DE_CPU_VANILLA` matters: CMake's default (x86_64) makes dEQP assume little-endian. Install `deqp-gles2`, its `gles2/` data directory and the must-pass list (`external/openglcts/data/gl_cts/data/mustpass/gles/aosp_mustpass/main/gles2-main.txt`) under `/opt/deqp` on the console, with `conformance/run-watched.sh` and `gl-ready.sh`. Then see [conformance.md](conformance.md).
+
+## Keeping RAM free (458 MB)
+
+The default desktop is IceWM (`config/systemd/icewm-glamor.service`). Xfce fits but leaves too little for anything else. Userspace settings that help, all in `config/`:
+
+- `tmpfiles/zswap-off.conf`: swap is already zram (compressed RAM). zswap in front of it compressed the same pages a second time and held a 38 MB pool.
+- `systemd/udev-prune-legacy-pty.service`: the kernel creates 512 legacy BSD pty devices. udev keeps a small record file for each in /run, and with 64 KB pages each file costs a whole page: 16 MB of RAM for devices nobody uses.
+- `journald/small.conf`: journal in RAM only, capped at 8 MB.
+- `icewm/preferences` (`~/.icewm/preferences`): xterm as IceWM's terminal. xfce4-terminal plus the xfconfd it starts take about 45 MB.
+- cron and rpcbind disabled (the NFS root is mounted with `nolock`, so it doesn't need rpcbind).
+
+Bigger savings would need kernel changes: 4 KB pages instead of 64 KB (every small file, page-table page and partly used allocation costs 64 KB now), `pty.legacy_count=0` or `CONFIG_LEGACY_PTYS=n`, a smaller `coherent_pool` than 16M, and a smaller GPU pool than 48 MB.
