@@ -1,0 +1,100 @@
+From 3406bf1eb7c5f54dd63e1a2d7e05503cb28a3237 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:59:47 -0700
+Subject: [PATCH] freedreno/xenos: 12 + 14 samplers, perspective-correct
+ gl_FragCoord.z
+
+- Vertex shader textures took the fetch constants after the fragment
+  shader's, and vertex buffers use fetch constants 20-25: with 16 + 16
+  advertised, vertex textures overwrote the vertex buffers (piglit
+  max-samplers). Fragment textures now take 0-11 and vertex textures 12-19
+  and 26-31: 12 + 14 (dEQP's uniform_api cases want up to 14 in the
+  vertex shader).
+- gl_FragCoord.z was the window z interpolated perspective-correctly; it
+  must be linear in screen space. Export z * w and divide by the
+  interpolated w in the fragment shader (which is exactly that).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/fd2_texture.c        |  5 +++++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c    | 17 +++++++++++++----
+ .../drivers/freedreno/freedreno_screen.c        |  7 +++++++
+ 3 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+index d783bc4..2d0397e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+@@ -255,6 +255,11 @@ fd2_get_const_idx(struct fd_context *ctx, struct fd_texture_stateobj *tex,
+ {
+    if (tex == &ctx->tex[MESA_SHADER_FRAGMENT])
+       return samp_id;
++   /* Xenos: fragment textures take fetch constants 0-11, vertex textures
++    * 12-19 and then 26-31; vertex buffers use 20-25 (16 attributes, three
++    * per constant). freedreno_screen.c advertises 12 + 14. */
++   if (fd2_xenos)
++      return samp_id < 8 ? 12 + samp_id : 26 + (samp_id - 8);
+    return samp_id + ctx->tex[MESA_SHADER_FRAGMENT].num_samplers;
+ }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 6708e58..3189fc9 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -647,11 +647,14 @@ load_input(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+       /* on a20x, C64 contains the tile offset */
+       instr->src[1] = ir2_src(64, 0, IR2_SRC_CONST);
+ 
+-      instr = instr_create_alu_reg(ctx, nir_op_mov, 4, instr);
+-      instr->src[0] = ir2_src(ctx->f->fragcoord, 0, IR2_SRC_INPUT);
+-
++      /* w = 1 / interpolated clip w, z = interpolated (z * w) * that */
+       instr = instr_create_alu_reg(ctx, nir_op_frcp, 8, instr);
+       instr->src[0] = ir2_src(ctx->f->fragcoord, IR2_SWIZZLE_Y, IR2_SRC_INPUT);
++      unsigned w_reg = instr->reg - ctx->reg;
++
++      instr = instr_create_alu_reg(ctx, nir_op_fmul, 4, instr);
++      instr->src[0] = ir2_src(ctx->f->fragcoord, 0, IR2_SRC_INPUT);
++      instr->src[1] = ir2_src(w_reg, IR2_SWIZZLE_W, IR2_SRC_REG);
+ 
+       unsigned reg_idx = instr->reg - ctx->reg; /* XXX */
+       instr = instr_create_alu_dest(ctx, nir_op_mov, def);
+@@ -1086,8 +1089,14 @@ extra_position_exports(struct ir2_context *ctx, bool binning)
+ 
+    /* fragcoord z/w */
+    if (ctx->f->fragcoord >= 0 && !binning) {
+-      instr = instr_create_alu(ctx, nir_op_mov, 1);
++      /* window z times clip w: the perspective-correct interpolation of
++       * that over the interpolated w is window z interpolated linearly in
++       * screen space, as gl_FragCoord.z must be (the fragment shader
++       * divides; piglit glsl-fs-fragcoord-zw-perspective) */
++      instr = instr_create_alu(ctx, nir_op_fmul, 1);
+       instr->src[0] = ir2_src(wincoord->idx, IR2_SWIZZLE_Z, IR2_SRC_SSA);
++      instr->src[1] = ctx->position;
++      instr->src[1].swizzle = IR2_SWIZZLE_W;
+       instr->alu.export = ctx->f->fragcoord;
+ 
+       instr = instr_create_alu(ctx, nir_op_mov, 1);
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 56b4725..ef6d24b 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -289,6 +289,13 @@ fd_init_shader_caps(struct fd_screen *screen)
+ 
+       caps->max_texture_samplers =
+       caps->max_sampler_views = 16;
++      /* Xenos: 32 fetch constants, vertex buffers in 20-25, so 12 fragment
++       * + 14 vertex textures (fd2_get_const_idx). With 16 + 16 the vertex
++       * textures overwrote the vertex buffers (piglit max-samplers); dEQP's
++       * uniform_api cases want up to 14 in the vertex shader. */
++      if (is_xenos(screen))
++         caps->max_texture_samplers = caps->max_sampler_views =
++            i == MESA_SHADER_VERTEX ? 14 : 12;
+ 
+       caps->supported_irs =
+          (1 << PIPE_SHADER_IR_NIR) |
+-- 
+2.53.0
+
