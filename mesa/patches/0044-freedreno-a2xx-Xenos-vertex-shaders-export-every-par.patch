@@ -1,0 +1,68 @@
+From ebfa3326f1809a21c09c0c955805909be67ed1e3 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 04:49:55 -0700
+Subject: [PATCH] freedreno/a2xx: Xenos vertex shaders export every parameter
+ the FS reads
+
+A point sprite replaces TEX0, so fixed-function vertex programs don't
+write it, but the fragment shader still reads it and Xenos waits forever
+for the export (piglit arb_point_sprite-checkerboard and -mipmap hung the
+GPU). Export zeros for any parameter the vertex shader leaves out, as
+already done when the fragment shader reads none.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c     | 15 +++++++++++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_private.h |  1 +
+ 2 files changed, 16 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 17a09c7..19a8067 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -640,6 +640,8 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
+    instr->alu.export = idx;
+    if (ctx->so->type == MESA_SHADER_FRAGMENT)
+       ctx->color_exported = true;
++   else if (idx < 32)
++      ctx->params_exported |= 1u << idx;
+ }
+ 
+ static void
+@@ -1309,6 +1311,19 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+       dummy->src[0] = ctx->position;
+       dummy->alu.export = 0;
+    }
++   /* Likewise every parameter the fragment shader reads must be exported,
++    * even one the vertex shader doesn't write (a point sprite replaces
++    * TEX0, so fixed-function vertex programs leave it out: piglit
++    * arb_point_sprite hung the GPU). Export zeros. */
++   if (so->type == MESA_SHADER_VERTEX && so->is_xenos) {
++      for (unsigned i = 0; i < ctx->f->inputs_count && i < 32; i++) {
++         if (ctx->params_exported & (1u << i))
++            continue;
++         struct ir2_instr *dummy = instr_create_alu(ctx, nir_op_mov, 4);
++         dummy->src[0] = load_const(ctx, (float[]){0.0f, 0.0f, 0.0f, 0.0f}, 4);
++         dummy->alu.export = i;
++      }
++   }
+ 
+    /* Xenos: a pixel shader that exports nothing (a depth-only pass: no draw
+     * buffers, so the color output was optimized away) wedges the GPU. Export
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 2054d50..94d769e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -150,6 +150,7 @@ struct ir2_context {
+ 
+    int prev_export;
+    bool color_exported;   /* fragment shader wrote its color output */
++   uint32_t params_exported;   /* vertex shader: parameter exports written */
+ 
+    /* RA state */
+    struct ir2_reg *live_regs[64];
+-- 
+2.53.0
+

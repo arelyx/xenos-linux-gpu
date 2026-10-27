@@ -141,6 +141,10 @@ A pixel shader with no color export wedges the GPU, even with no color buffer bo
 
 Sampling a texture in that format (RGB32F) hangs the GPU. freedreno's a2xx allowed it as the one non-power-of-two texel size; Xenos doesn't.
 
+### 27. 1D fetch constants hang; so does a parameter the vertex shader never writes
+
+A texture fetch constant with dimension 1D wedged the GPU (piglit `fbo-depth tex1d`, `copyteximage 1d`); Mesa describes 1D textures as 2D ones a texel high. And every parameter the pixel shader reads must be exported by the vertex shader, not only the first (rule from 26 Oct): fixed-function vertex programs leave TEX0 out when a point sprite replaces it, and `arb_point_sprite` hung the GPU until ir2 exported zeros for the missing ones.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

@@ -1,0 +1,39 @@
+From aa2406bfc793b7a0848446fb9caeab0c3f7a93b4 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 04:45:48 -0700
+Subject: [PATCH] freedreno/a2xx: count position and point size outside the 16
+ varyings
+
+max_outputs was 16 vec4s, the same as max_varyings, but a2xx exports
+position and point size separately (exports 62 and 63). GLSL linking
+counts gl_Position against max_outputs, so shaders using every advertised
+varying failed to link ("68 > 64"). piglit glsl-max-varyings and the
+varying-packing tests pass with 18.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_screen.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index e784dd0..741cb5d 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -252,7 +252,11 @@ fd_init_shader_caps(struct fd_screen *screen)
+          screen->info->props.vs_max_inputs_count : 16;
+ 
+       caps->max_outputs =
+-         (is_a6xx(screen) && !screen->info->props.is_a702) ? 32 : 16;
++         (is_a6xx(screen) && !screen->info->props.is_a702) ? 32 :
++         /* a2xx: position and point size have their own exports (62, 63), so 16
++          * varyings plus those; with 16 the linker refused shaders using every
++          * advertised varying ("68 > 64", piglit glsl-max-varyings) */
++         is_a2xx(screen) ? 18 : 16;
+ 
+       caps->max_temps = 64; /* Max native temporaries. */
+ 
+-- 
+2.53.0
+
