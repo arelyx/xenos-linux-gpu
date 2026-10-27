@@ -1,4 +1,4 @@
-From ebfa3326f1809a21c09c0c955805909be67ed1e3 Mon Sep 17 00:00:00 2001
+From b1f28ad8d8c1e7bc9c4ddeeadda4c151bd9fce44 Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 04:49:55 -0700
 Subject: [PATCH] freedreno/a2xx: Xenos vertex shaders export every parameter
@@ -14,12 +14,12 @@ Generated-by: LLM
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
 ---
- src/gallium/drivers/freedreno/a2xx/ir2_nir.c     | 15 +++++++++++++++
- src/gallium/drivers/freedreno/a2xx/ir2_private.h |  1 +
- 2 files changed, 16 insertions(+)
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 22 +++++++++++++++++++
+ .../drivers/freedreno/a2xx/ir2_private.h      |  1 +
+ 2 files changed, 23 insertions(+)
 
 diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
-index 17a09c7..19a8067 100644
+index 17a09c7..89ce06b 100644
 --- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
 +++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
 @@ -640,6 +640,8 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
@@ -31,7 +31,7 @@ index 17a09c7..19a8067 100644
  }
  
  static void
-@@ -1309,6 +1311,19 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+@@ -1309,6 +1311,26 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
        dummy->src[0] = ctx->position;
        dummy->alu.export = 0;
     }
@@ -40,6 +40,13 @@ index 17a09c7..19a8067 100644
 +    * TEX0, so fixed-function vertex programs leave it out: piglit
 +    * arb_point_sprite hung the GPU). Export zeros. */
 +   if (so->type == MESA_SHADER_VERTEX && so->is_xenos) {
++      /* exports written anywhere: store_output, and extra_position_exports
++       * (gl_FragCoord's parameter) */
++      for (unsigned i = 0; i < ctx->instr_count; i++) {
++         struct ir2_instr *in = &ctx->instr[i];
++         if (in->type == IR2_ALU && in->alu.export >= 0 && in->alu.export < 32)
++            ctx->params_exported |= 1u << in->alu.export;
++      }
 +      for (unsigned i = 0; i < ctx->f->inputs_count && i < 32; i++) {
 +         if (ctx->params_exported & (1u << i))
 +            continue;

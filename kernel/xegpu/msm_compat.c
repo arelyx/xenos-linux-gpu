@@ -236,7 +236,9 @@ static bool xe_resolve_ok(const struct xe_range *r, int n, const struct xe_cstat
 {
 	u32 pitch = st->copy_pitch & 0x3fff, height = (st->copy_pitch >> 16) & 0x3fff;
 	u32 fmt = (st->copy_info >> 7) & 0x3f;
-	u32 bpp = (fmt == 6) ? 4 : 16;	/* k_8_8_8_8; anything else gets the worst case */
+	/* k_8_8_8_8, k_24_8 and k_24_8_FLOAT (depth resolves) are 4 bytes; anything
+	 * else gets the worst case */
+	u32 bpp = (fmt == 6 || fmt == 22 || fmt == 23) ? 4 : 16;
 	/* tiled destinations are padded to 32x32 */
 	u32 h = (height + 31) & ~31u, p = (pitch + 31) & ~31u;
 	return in_ranges(r, n, st->copy_base & ~0xfffu, p * h * bpp, NULL);
