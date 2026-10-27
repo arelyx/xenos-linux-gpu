@@ -1,0 +1,115 @@
+From de7dae3b7a9c9e544db4cae1f2ca968ac6678a1f Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 16:21:18 -0700
+Subject: [PATCH] freedreno/xenos: destination alpha is 1 for color buffers
+ without alpha
+
+Blending with DST_ALPHA / ONE_MINUS_DST_ALPHA into an RGBX buffer read the
+X channel. Keep a second RB_BLEND_CONTROL with those factors replaced by
+ONE / ZERO (and SRC_ALPHA_SATURATE by ZERO) and emit it when the bound
+color buffer has no alpha (piglit fbo-blending-formats).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/fd2_blend.c        | 23 ++++++++++++++++++-
+ .../drivers/freedreno/a2xx/fd2_blend.h        |  1 +
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 14 +++++++++--
+ 3 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_blend.c b/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
+index 38bd9a5..4b4457a 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_blend.c
+@@ -78,6 +78,27 @@ fd2_blend_state_create(struct pipe_context *pctx,
+       A2XX_RB_BLEND_CONTROL_ALPHA_DESTBLEND(
+          fd_blend_factor(rt->alpha_dst_factor));
+ 
++   /* a color buffer without alpha reads destination alpha as 1 (piglit
++    * fbo-blending-formats: Xenos read the X channel) */
++   {
++      unsigned f[4] = {rt->rgb_src_factor, rt->rgb_dst_factor, alpha_src_factor, rt->alpha_dst_factor};
++      for (unsigned k = 0; k < 4; k++) {
++         if (f[k] == PIPE_BLENDFACTOR_DST_ALPHA)
++            f[k] = PIPE_BLENDFACTOR_ONE;
++         else if (f[k] == PIPE_BLENDFACTOR_INV_DST_ALPHA)
++            f[k] = PIPE_BLENDFACTOR_ZERO;
++         else if (f[k] == PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE && k < 2)
++            f[k] = PIPE_BLENDFACTOR_ZERO;   /* min(As, 1 - 1) */
++      }
++      so->rb_blendcontrol_noalpha =
++         A2XX_RB_BLEND_CONTROL_COLOR_SRCBLEND(fd_blend_factor(f[0])) |
++         A2XX_RB_BLEND_CONTROL_COLOR_COMB_FCN(blend_func(rt->rgb_func)) |
++         A2XX_RB_BLEND_CONTROL_COLOR_DESTBLEND(fd_blend_factor(f[1])) |
++         A2XX_RB_BLEND_CONTROL_ALPHA_SRCBLEND(fd_blend_factor(f[2])) |
++         A2XX_RB_BLEND_CONTROL_ALPHA_COMB_FCN(blend_func(rt->alpha_func)) |
++         A2XX_RB_BLEND_CONTROL_ALPHA_DESTBLEND(fd_blend_factor(f[3]));
++   }
++
+    if (rt->colormask & PIPE_MASK_R)
+       so->rb_colormask |= A2XX_RB_COLOR_MASK_WRITE_RED;
+    if (rt->colormask & PIPE_MASK_G)
+@@ -92,7 +113,7 @@ fd2_blend_state_create(struct pipe_context *pctx,
+       /* Xenos has no BLEND_DISABLE bit (pad in RB_COLORCONTROL): "disabled"
+        * is src ONE, dst ZERO, as libxenon programs it */
+       if (is_xenos(fd_context(pctx)->screen))
+-         so->rb_blendcontrol = 0x00010001;
++         so->rb_blendcontrol = so->rb_blendcontrol_noalpha = 0x00010001;
+    }
+ 
+    if (cso->dither)
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_blend.h b/src/gallium/drivers/freedreno/a2xx/fd2_blend.h
+index 998103c..5df4bc5 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_blend.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_blend.h
+@@ -15,6 +15,7 @@
+ struct fd2_blend_stateobj {
+    struct pipe_blend_state base;
+    uint32_t rb_blendcontrol;
++   uint32_t rb_blendcontrol_noalpha;   /* for color buffers without alpha */
+    uint32_t rb_colorcontrol; /* must be OR'd w/ zsa->rb_colorcontrol */
+    uint32_t rb_colormask;
+ };
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index cf46a8b..e38565d 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -125,6 +125,16 @@ emit_constants(struct fd_context *ctx, struct fd_ringbuffer *ring, uint32_t base
+    }
+ }
+ 
++/* RB_BLEND_CONTROL for the bound color buffer */
++static uint32_t
++fd2_blend_control(struct fd_context *ctx, struct fd2_blend_stateobj *blend)
++{
++   struct pipe_surface *cb = &ctx->batch->framebuffer.cbufs[0];
++   if (fd2_xenos && cb->texture && !util_format_has_alpha(cb->format))
++      return blend->rb_blendcontrol_noalpha;
++   return blend->rb_blendcontrol;
++}
++
+ typedef uint32_t texmask;
+ 
+ static texmask
+@@ -285,7 +295,7 @@ fd2_emit_state_binning(struct fd_context *ctx,
+    if (dirty & (FD_DIRTY_BLEND | FD_DIRTY_FRAMEBUFFER)) {
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_BLEND_CONTROL));
+-      OUT_RING(ring, blend->rb_blendcontrol);
++      OUT_RING(ring, fd2_blend_control(ctx, blend));
+ 
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_MASK));
+@@ -478,7 +488,7 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+    if (dirty & (FD_DIRTY_BLEND | FD_DIRTY_FRAMEBUFFER)) {
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_BLEND_CONTROL));
+-      OUT_RING(ring, blend->rb_blendcontrol);
++      OUT_RING(ring, fd2_blend_control(ctx, blend));
+ 
+       /* Xenos: without a color buffer, EDRAM color base 0 is where the depth
+        * buffer lives too; color writes there wedged the GPU (piglit fbo-depth
+-- 
+2.53.0
+

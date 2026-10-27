@@ -29,7 +29,7 @@ int main(void)
 	}
 	GLuint tex, fbo, c;
 	glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_3D, tex);
-	glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, W, H, D, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
+	glTexImage3D(GL_TEXTURE_3D, 0, getenv("IFMT") ? (int)strtol(getenv("IFMT"), 0, 0) : GL_RGBA8, W, H, D, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);   /* IFMT: internal format */
 	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
