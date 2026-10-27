@@ -76,12 +76,16 @@ The 1-in-20 sample passed after rounds 3 and 4; the full run (17,165 cases, now 
 
 ## Where the time goes now
 
-For `glrt`'s small batch: about 34 µs in the kernel submit (11 of them the checker), the rest in Mesa building the batch and in the GPU round trip. A copy inside a batch costs about 65 µs; that hasn't been profiled in detail yet, but every in-batch resolve forces Mesa to re-emit all state for the next draw. Large copies and scrolls are bound by GPU memory traffic: a 500x500 scroll goes through a temporary pixmap, restoring and resolving about 4 MB.
+Measured after the texture cache fix (26 October evening).
+
+- **A tiny batch (`glrt`) costs about 60 µs of user-space CPU** even without waiting for the GPU (`glrt 64 20000 draw nofinish`: 1.2 s user for 20,000 batches). Stack samples: the kernel submit ioctl 27%, creating and destroying the batch and its submit (ring buffers from the BO cache, a slab pool and hash tables per submit) about 30%, building the restore, draw and resolve the rest. The submit is about 790 command dwords; the checker spends about 14 µs on them, but turning it off entirely only saved 0-10 µs of `glrt`'s 86-98 µs (run-to-run noise is about 6 µs).
+- **A 10x10 copy (`copywinwin10`, about 52 µs)** has no single hot spot. Xorg waited for the client in 18% of samples. Of the rest, glamor's copy is about half: the GL draw path, `glamor_use_program`, uniforms, binding textures, mapping the VBO, the in-batch barrier, each a few percent. Re-emitting state after an in-batch resolve (`fd2_emit_state`) is about 6%, so skipping unchanged state would save a few microseconds, not halve the cost.
+- **A 10x10 GetImage (about 260 µs)**: Xorg waits for the client in 45% of samples. The GPU round trip for the readback blit is about 44 µs. Reading back through the CPU instead (`XENOS_READ_BLIT_MIN_PIXELS`) is slower now: 3,320/s against 3,840/s by blit at 10x10, and 4 times slower at 100x100.
+- **Real terminal workloads are bound by the client, not X.** `conformance/appbench.sh` scrolls 100,000 lines through a 160x50 terminal: xterm with core fonts 3.45 s on glamor and 3.28 s without acceleration, xterm with Xft 3.94 s and 3.86 s, xfce4-terminal 16.3 s and 14.9 s (`results/perf/appbench-2026-10-26.txt`). During the xfce4-terminal run Xorg was idle in 148 of 150 stack samples; VTE and cairo render on the CPU in the client.
+- Large uploads are near the CPU's limit already: `gltest/bomem` measures about 470 MB/s copying 2000-byte rows into a write-combined buffer (38 MB/s reading one back), so a 500x500 ShmPutImage spends about 2.2 of its 2.5 ms in that copy.
 
 Next:
 
-- Don't re-emit unchanged state; Xenos uploads whole 16-constant blocks and reloads shaders after every resolve.
+- Real GL applications as benchmarks (glmark2-es2, es2gears), which is where the GPU matters more than X's small operations.
+- Cheaper batches in Mesa: keep the per-submit slab pool, hash tables and ring buffers instead of rebuilding them each batch.
 - Skip the restore when a draw covers its whole scissor with an opaque copy (the scroll case).
-- Small readbacks: `getimage10` still loses to the CPU (3,790 vs 9,980).
-- Large uploads are near the CPU's limit already: `gltest/bomem` measures about 470 MB/s copying 2000-byte rows into a write-combined buffer (38 MB/s reading one back), so a 500x500 ShmPutImage spends about 2.2 of its 2.5 ms in that copy.
-- Merge glamor's small operations into fewer batches.

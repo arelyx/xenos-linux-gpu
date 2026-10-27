@@ -1,0 +1,8 @@
+# conformance/appbench.sh: seconds to scroll lines through a 160x50 terminal, fresh Xorg, no window manager
+glamor xterm-core 3.45
+glamor xterm-xft 3.94
+glamor xfce4-terminal 16.28
+noaccel xterm-core 3.28
+noaccel xterm-xft 3.86
+noaccel xfce4-terminal 14.90
+# Xorg was in epoll_wait in 148 of 150 stack samples during the xfce4-terminal run: the client (VTE/cairo on the CPU) is the bottleneck.
