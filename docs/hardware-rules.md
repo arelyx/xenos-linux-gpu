@@ -153,6 +153,10 @@ Mesa saves and restores depth between batches through the color path (the EDRAM 
 
 The texture fetch opcode `TEX_GET_GRADIENTS` (18) returns d/dx and d/dy of its source's x component in .x and .y (no texture involved). ir2 implements GLSL `dFdx`, `dFdy` and `fwidth` with it, one component at a time; piglit `glsl-derivs`, `glsl-fwidth` and `fbo-deriv` pass.
 
+### 30. `SQ_INTERPOLATOR_CNTL.PARAM_SHADE`: set = interpolated, clear = flat
+
+One bit per parameter. All set (what we wrote since bring-up) interpolates everything; flat varyings and colors under `glShadeModel(GL_FLAT)` need their bit clear (piglit `glsl-fs-flat-color`, `clipflat`, `arb-provoking-vertex-render`).
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

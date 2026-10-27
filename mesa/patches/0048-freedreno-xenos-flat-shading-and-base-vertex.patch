@@ -1,0 +1,113 @@
+From e20ca9fc412aad3ccd3923a9320084dc797382b1 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 07:41:01 -0700
+Subject: [PATCH] freedreno/xenos: flat shading and base vertex
+
+- SQ_INTERPOLATOR_CNTL's PARAM_SHADE bits were all set: every varying was
+  interpolated. A set bit means interpolated, a clear one flat (found with
+  piglit glsl-fs-flat-color): clear the bits of flat varyings, and of
+  color inputs while the rasterizer has flatshade (glShadeModel(GL_FLAT)).
+- VGT_INDX_OFFSET is the base vertex of an indexed draw; it was 0.
+
+piglit glsl-fs-flat-color, arb-provoking-vertex-render, clipflat,
+line-flat-clip-color, gl-1.0-dlist-shademodel and the
+arb_draw_elements_base_vertex tests pass.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c |  3 ++-
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 15 +++++++++++++++
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  4 ++++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 12 ++++++++++++
+ 4 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 0ba81b8..5a2d3ea 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -79,7 +79,8 @@ draw_impl(struct fd_context *ctx, const struct pipe_draw_info *info,
+ {
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
+-   OUT_RING(ring, info->index_size ? 0 : draw->start);
++   /* indexed draws: the base vertex (glDrawElementsBaseVertex) */
++   OUT_RING(ring, info->index_size ? draw->index_bias : draw->start);
+ 
+    if (is_xenos(ctx->screen)) {
+       /* Invalidate exact ranges, as libxenon does on unlock. The all-of-DRAM
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 4470b2c..1bd69b8 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -260,6 +260,7 @@ fd2_emit_state_binning(struct fd_context *ctx,
+                 (fd2_xenos ? FD_DIRTY_VTXBUF : 0)))   /* Xenos: buffer offsets live in the shader */
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
++
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+       emit_constants(ctx, ring, VS_CONST_BASE * 4,
+                      &ctx->constbuf[MESA_SHADER_VERTEX],
+@@ -425,6 +426,20 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+                 (fd2_xenos ? FD_DIRTY_VTXBUF : 0)))   /* Xenos: buffer offsets live in the shader */
+       fd2_program_emit(ctx, ring, &ctx->prog);
+ 
++   /* Xenos: PARAM_SHADE bit set = interpolated, clear = flat (found with
++    * piglit glsl-fs-flat-color); flat varyings, and colors under
++    * glShadeModel(GL_FLAT) */
++   if (fd2_xenos && (dirty & (FD_DIRTY_PROG | FD_DIRTY_RASTERIZER)) && ctx->prog.fs &&
++       !debug_get_option_xenos_interp()) {
++      struct fd2_shader_stateobj *fp = ctx->prog.fs;
++      struct pipe_rasterizer_state *rast = ctx->rasterizer;
++      uint32_t flat = fp->variant[0].f.flat_mask |
++                      (rast && rast->flatshade ? fp->variant[0].f.color_mask : 0);
++      OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++      OUT_RING(ring, CP_REG(REG_A2XX_SQ_INTERPOLATOR_CNTL));
++      OUT_RING(ring, 0xffffffff & ~flat);
++   }
++
+    if (dirty & (FD_DIRTY_PROG | FD_DIRTY_CONST)) {
+       emit_constants(ctx, ring, VS_CONST_BASE * 4,
+                      &ctx->constbuf[MESA_SHADER_VERTEX],
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index c548608..2508226 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -58,6 +58,10 @@ struct ir2_frag_linkage {
+ 
+    /* driver_location of fragcoord.zw, -1 if not used */
+    int fragcoord;
++
++   /* inputs that are flat-shaded, and color inputs that follow the
++    * rasterizer's flatshade (bit = input index) */
++   uint16_t flat_mask, color_mask;
+ };
+ 
+ struct ir2_shader_variant {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 027e685..63d85a6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -933,6 +933,18 @@ setup_input(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+    ctx->f->inputs[n].slot = slot;
+    ctx->f->inputs[n].ncomp = MAX2(ctx->f->inputs[n].ncomp, ncomp);
+ 
++   /* lowered IO: flat inputs are read with load_input, interpolated ones with
++    * load_interpolated_input, whose barycentric source carries the mode */
++   if (intr->intrinsic == nir_intrinsic_load_input) {
++      ctx->f->flat_mask |= 1u << n;
++   } else if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
++      nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
++      if (bary && nir_intrinsic_interp_mode(bary) == INTERP_MODE_NONE &&
++          (slot == VARYING_SLOT_COL0 || slot == VARYING_SLOT_COL1 ||
++           slot == VARYING_SLOT_BFC0 || slot == VARYING_SLOT_BFC1))
++         ctx->f->color_mask |= 1u << n;
++   }
++
+    /* nir_intrinsic_io_semantics(intr).interp_mode?
+     * opengl ES 2.0 can't do flat mode, but we still get it from GALLIUM_HUD
+     */
+-- 
+2.53.0
+

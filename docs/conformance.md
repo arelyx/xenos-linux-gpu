@@ -81,3 +81,5 @@ Third pass (gl20-3, after Mesa 0043-0045: varying count, point sprite exports, d
 
 Fourth pass (gl20-4, with Mesa 0046's first version, which also converted CPU writes of depth): 808 pass, 70.9%, 9 fixed against gl20-3, 3 regressed and 6 new crashes. The final 0046 converts reads only and skips swapped halves that fall past the row: `depth-tex-modes`, `depth-tex-modes-glsl` pass again and the crashes are gone. `glsl-fs-fragcoord-zw-ortho` still fails (it probes depth at x = 255 of a 256-pixel window, inside a partial EDRAM tile).
 
+Fifth pass (gl20-5, after Mesa 0047 LOD clamps/base level): 824 pass, **72.3%** of executed, no hangs. Mesa 0048 then fixes flat shading and the base vertex (seven more tests pass alone); gl20-6 measures it.
+
