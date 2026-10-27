@@ -1,0 +1,43 @@
+From c1387a59ef5371a405cc95ad57170679faafdae0 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 04:03:13 -0700
+Subject: [PATCH] freedreno/xenos: sample 1D textures as 2D
+
+A 1D fetch constant hung the GPU (piglit fbo-depth tex1d, copyteximage 1d,
+fbo-generatemipmap-1d). Describe 1D textures as 2D textures one texel
+high; ir2 already repeats the coordinate.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_texture.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+index 967d93f..cf4cf0e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_texture.c
+@@ -13,6 +13,7 @@
+ 
+ #include "fd2_context.h"
+ #include "fd2_texture.h"
++#include "fd2_emit.h"
+ #include "util/u_endian.h"
+ #include "util/format/u_format.h"
+ #include "fd2_util.h"
+@@ -136,7 +137,10 @@ tex_dimension(unsigned target)
+    default:
+       UNREACHABLE("Unsupported target");
+    case PIPE_TEXTURE_1D:
+-      assert(0); /* TODO */
++      /* Xenos: a 1D fetch constant hung the GPU (piglit fbo-depth tex1d,
++       * copyteximage 1d); sample it as a 2D texture one texel high */
++      if (fd2_xenos)
++         return SQ_TEX_DIMENSION_2D;
+       return SQ_TEX_DIMENSION_1D;
+    case PIPE_TEXTURE_RECT:
+    case PIPE_TEXTURE_2D:
+-- 
+2.53.0
+
