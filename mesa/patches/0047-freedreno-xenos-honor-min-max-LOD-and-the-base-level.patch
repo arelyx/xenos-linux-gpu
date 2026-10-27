@@ -1,0 +1,73 @@
+From 288fe39e7fe6edb11861d764ab007e6dc924e1a5 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 06:57:14 -0700
+Subject: [PATCH] freedreno/xenos: honor min/max LOD and the base level without
+ mipmapping
+
+a2xx has no LOD clamp: narrow the fetch constant's mip level range to the
+sampler's min_lod/max_lod. And with mipmapping off the hardware samples
+the base address (level 0) where GL samples the base level: describe the
+base level (address, pitch, size) as the texture in that case.
+
+piglit tex-miplevel-selection 2D, 1D, cube, bias and projected variants
+pass on Xenos (3D still fails).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 33 ++++++++++++++++---
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 1a1decf..4470b2c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -154,15 +154,40 @@ emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+    OUT_PKT3(ring, CP_SET_CONSTANT, 7);
+    OUT_RING(ring, 0x00010000 + (0x6 * const_idx));
+ 
+-   OUT_RING(ring, sampler->tex0 | view->tex0);
++   /* Without mipmapping the hardware samples the base address, level 0, but
++    * GL samples the base level: describe that level as the texture (Xenos;
++    * piglit tex-miplevel-selection with GL_TEXTURE_BASE_LEVEL > 0) */
++   uint32_t tex0 = view->tex0, tex2 = view->tex2, base_level = 0;
++   if (fd2_xenos && rsc && sampler->base.min_mip_filter == PIPE_TEX_MIPFILTER_NONE &&
++       view->base.target != PIPE_BUFFER && view->base.u.tex.first_level > 0) {
++      struct pipe_resource *prsc = &rsc->b.b;
++      base_level = view->base.u.tex.first_level;
++      tex0 = (tex0 & ~A2XX_SQ_TEX_0_PITCH__MASK) |
++             A2XX_SQ_TEX_0_PITCH(fdl2_pitch_pixels(&rsc->layout, base_level));
++      tex2 = (tex2 & ~(A2XX_SQ_TEX_2_WIDTH__MASK | A2XX_SQ_TEX_2_HEIGHT__MASK)) |
++             A2XX_SQ_TEX_2_WIDTH(u_minify(prsc->width0, base_level) - 1) |
++             A2XX_SQ_TEX_2_HEIGHT(u_minify(prsc->height0, base_level) - 1);
++   }
++   OUT_RING(ring, sampler->tex0 | tex0);
+    if (rsc)
+-      OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, 0, 0), view->tex1, 0);
++      OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, base_level, 0), view->tex1, 0);
+    else
+       OUT_RING(ring, 0);
+ 
+-   OUT_RING(ring, view->tex2);
++   OUT_RING(ring, tex2);
+    OUT_RING(ring, sampler->tex3 | view->tex3);
+-   OUT_RING(ring, sampler->tex4 | view->tex4);
++   /* GL_TEXTURE_MIN_LOD/MAX_LOD: a2xx has no LOD clamp, so narrow the mip
++    * level range instead (piglit tex-miplevel-selection) */
++   uint32_t tex4 = view->tex4;
++   if (fd2_xenos && sampler != &dummy_sampler &&
++       sampler->base.min_mip_filter != PIPE_TEX_MIPFILTER_NONE) {
++      unsigned vmin = (tex4 >> 2) & 0xf, vmax = (tex4 >> 6) & 0xf;
++      float maxl = MAX2(sampler->base.max_lod, 0.0f), minl = MAX2(sampler->base.min_lod, 0.0f);
++      unsigned hi = MIN2(vmax, vmin + (unsigned)MIN2(maxl, 15.0f));
++      unsigned lo = MIN2(hi, vmin + (unsigned)MIN2(minl, 15.0f));
++      tex4 = (tex4 & ~0x3fcu) | (lo << 2) | (hi << 6);
++   }
++   OUT_RING(ring, sampler->tex4 | tex4);
+ 
+    if (rsc && rsc->b.b.last_level)
+       OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, 1, 0), view->tex5, 0);
+-- 
+2.53.0
+
