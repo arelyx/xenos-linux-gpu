@@ -79,3 +79,5 @@ First pass (`results/piglit-gl20-1-summary.txt`): 763 pass, 307 fail, 63 crash, 
 
 Third pass (gl20-3, after Mesa 0043-0045: varying count, point sprite exports, derivatives, texelFetch): 802 pass, 324 fail, 9 crash, 0 hangs, 1,471 skip: **70.4%** of executed tests. dEQP full15 after the same changes: 99.8% (two `texture.size` cases out of GPU pool memory this time, which come and go between runs).
 
+Fourth pass (gl20-4, with Mesa 0046's first version, which also converted CPU writes of depth): 808 pass, 70.9%, 9 fixed against gl20-3, 3 regressed and 6 new crashes. The final 0046 converts reads only and skips swapped halves that fall past the row: `depth-tex-modes`, `depth-tex-modes-glsl` pass again and the crashes are gone. `glsl-fs-fragcoord-zw-ortho` still fails (it probes depth at x = 255 of a 256-pixel window, inside a partial EDRAM tile).
+

@@ -1,50 +1,50 @@
-From 760c2495a9a2407941e7339ab56a156beba203c2 Mon Sep 17 00:00:00 2001
+From 298616ec1bc17f66a95bb54327b726c491f1b87b Mon Sep 17 00:00:00 2001
 From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 06:29:58 -0700
-Subject: [PATCH] freedreno/xenos: undo the depth layout when the CPU maps
+Subject: [PATCH] freedreno/xenos: undo the depth layout when the CPU reads
  depth
 
 Depth reaches memory through the color path: within each 80-pixel EDRAM
 tile the 40-pixel halves are swapped, and each word is Mesa's Z24S8
-byte-swapped and rotated by 8. Undo both in the CPU (de)tiling of
-depth/stencil resources. Readback is now exact when the width is a
-multiple of 80; in a partial last tile the swapped half falls outside the
-resolve and stays wrong (extending the resolve hung the GPU at some sizes;
-open).
+byte-swapped and rotated by 8. Undo both when the CPU reads a
+depth/stencil resource. Exact when the width is a multiple of 80; in a
+partial last tile the swapped half lies past the row and keeps its old
+contents (extending the resolve hung the GPU at some sizes; open).
+CPU writes are left alone: depth textures the CPU uploads are sampled,
+and the texture unit reads them in Mesa's layout.
 
 Generated-by: LLM
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
 ---
- .../drivers/freedreno/freedreno_resource.c    | 22 +++++++++++++++++++
- 1 file changed, 22 insertions(+)
+ .../drivers/freedreno/freedreno_resource.c    | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
 
 diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
-index 74f9ebd..b5d17d2 100644
+index 74f9ebd..17d863c 100644
 --- a/src/gallium/drivers/freedreno/freedreno_resource.c
 +++ b/src/gallium/drivers/freedreno/freedreno_resource.c
-@@ -824,6 +824,28 @@ xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *
+@@ -824,6 +824,27 @@ xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *
     uint8_t *tiled = (uint8_t *)fd_bo_map(rsc->bo) + fd_resource_offset(rsc, level, box->z);
     unsigned cpp = rsc->layout.cpp;
     unsigned pitch_px = fd_resource_pitch(rsc, level) / cpp;
 +
 +   /* Depth/stencil reaches memory through the color path (fd2_gmem.c): within
 +    * each 80-pixel EDRAM tile the 40-pixel halves are swapped, and each word
-+    * is Mesa's Z24S8 byte-swapped and rotated left by 8 (hardware rule 28). */
-+   if (util_format_is_depth_or_stencil(rsc->b.b.format) && cpp == 4) {
++    * is Mesa's Z24S8 byte-swapped and rotated left by 8 (hardware rule 28).
++    * Reads undo that. Writes stay as they are: depth textures the CPU uploads
++    * are sampled, and the texture unit reads them in Mesa's layout. */
++   if (util_format_is_depth_or_stencil(rsc->b.b.format) && cpp == 4 && to_linear) {
 +      for (int y = 0; y < box->height; y++) {
 +         for (int x = 0; x < box->width; x++) {
 +            unsigned px = box->x + x;
 +            unsigned sx = px / 80 * 80 + (px % 80 + 40) % 80;
++            if (sx >= pitch_px)   /* swapped half past the end of the row: not resolved */
++               sx = px;
 +            uint32_t *t = (uint32_t *)(tiled + (size_t)xenos_tiled_texel(sx, box->y + y, pitch_px, cpp) * cpp);
 +            uint32_t *l = (uint32_t *)(linear + (size_t)y * stride + (size_t)x * cpp);
-+            if (to_linear) {
-+               uint32_t v = __builtin_bswap32(*t);
-+               *l = (v >> 8) | (v << 24);
-+            } else {
-+               uint32_t v = *l;
-+               *t = __builtin_bswap32((v << 8) | (v >> 24));
-+            }
++            uint32_t v = __builtin_bswap32(*t);
++            *l = (v >> 8) | (v << 24);
 +         }
 +      }
 +      return;
