@@ -283,12 +283,34 @@ static int cp_submit(u32 addr, u32 ndw, u64 *fence_out)
 			return rc;
 		}
 	}
-	for (t = 0; rb_free() < 64; t++) {
-		if (t > 20000) {
-			mutex_unlock(&cp_lock);
-			return -EBUSY;
+	if (gpu_hung) {
+		mutex_unlock(&cp_lock);
+		return -EIO;
+	}
+	/* Wait for ring space. If the CP stops reading the ring for 3 s the GPU is
+	 * hung (no software reset on Xenos): say so, count it as a stall and fail
+	 * every later submit with -EIO, instead of user space spinning in this
+	 * ioctl with nothing logged (a resize hang did that, 26 Oct 2026). */
+	if (rb_free() < 64) {
+		u32 last = rr(0x0710);
+		unsigned long since = jiffies;
+
+		while (rb_free() < 64) {
+			u32 r = rr(0x0710);
+
+			if (r != last) {
+				last = r;
+				since = jiffies;
+			} else if (time_after(jiffies, since + msecs_to_jiffies(3000))) {
+				fence_stalls++;
+				gpu_hung = true;
+				pr_err("xegpu: CP stopped reading the ring (rptr %x wptr %x, RBBM_STATUS %08x, COHER_STATUS_HOST %08x); GPU hung, power-cycle the console\n",
+				       r, rb_wptr, rr(0x1740), rr(0x0a31 * 4));
+				mutex_unlock(&cp_lock);
+				return -EIO;
+			}
+			usleep_range(50, 200);
 		}
-		udelay(50);
 	}
 	/* invalidate the GPU's cache over the command buffer (Xe_pInvalidateGpuCache_Primary) */
 	{

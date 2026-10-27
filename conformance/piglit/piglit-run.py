@@ -7,7 +7,7 @@ a batch leaves the GPU hung (fence timeout/stall) or the console stops answering
 test that was running is recorded as hang and the console is power-cycled.
 State is in <out>/results.tsv, so a run resumes where it stopped.
 
-usage: piglit-run.py <list.xml.gz> <outdir> [--filter REGEX] [--batch N] [--skip FILE]
+usage: piglit-run.py <list.xml.gz> <outdir> [--filter REGEX] [--names FILE] [--batch N] [--skip FILE]
 """
 import argparse, gzip, os, re, subprocess, sys, time, ast, xml.etree.ElementTree as ET
 
@@ -64,9 +64,13 @@ def main():
     ap.add_argument("--filter"); ap.add_argument("--batch", type=int, default=40)
     ap.add_argument("--per-test", type=int, default=30)
     ap.add_argument("--skip", help="file of regexes recorded as skip (known hangs)")
+    ap.add_argument("--names", help="file of test names to run (one per line)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     tests = load_tests(a.list, a.filter)
+    if a.names:
+        want = set(l.rstrip("\n") for l in open(a.names) if l.strip())
+        tests = [t for t in tests if t[0] in want]
     skips = [re.compile(l.strip()) for l in open(a.skip) if l.strip() and not l.startswith("#")] if a.skip else []
     rdir = f"{NFS}/opt/piglit-runs/{os.path.basename(os.path.abspath(a.out))}"
     os.makedirs(rdir, exist_ok=True); os.chmod(rdir, 0o777)
@@ -104,10 +108,10 @@ def main():
             if name in got and got[name] != "running":
                 record(a.out, name, got[name])
         running = [k for k, v in got.items() if v == "running"]
-        hung = not gpu_ok()
+        hung = not gpu_ok() or "hang" in got.values()
         log(a.out, f"batch {n}: {len(batch)} tests, {len([1 for k in got if got[k] != 'running'])} results in {time.time()-t0:.0f}s, rc={rc} running={running} hung={hung}")
         if hung or rc == -1:
-            culprit = running[0] if running else next((nm for nm, _ in batch if nm not in got), None)
+            culprit = running[0] if running else None
             if culprit:
                 record(a.out, culprit, "hang")
             subprocess.run([CYCLE, "force"], capture_output=True)

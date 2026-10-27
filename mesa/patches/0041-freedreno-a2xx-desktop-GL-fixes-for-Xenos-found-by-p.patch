@@ -1,0 +1,180 @@
+From 5fb68ef2b77613d61061cff3b9e865c46f7815b0 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 03:26:24 -0700
+Subject: [PATCH] freedreno/a2xx: desktop GL fixes for Xenos found by piglit
+
+- ir2: 1D and 3D texture lookups (the fetch constant carries the
+  dimension), and shadow samplers compared in the shader (GL_LEQUAL only);
+  ir2 used to abort on all three.
+- ir2: a pixel shader that exports nothing (depth-only pass, no draw
+  buffers) wedges Xenos; export a constant color.
+- No color writes when the framebuffer has no color buffer.
+- Don't sample k_32_32_32_FLOAT on Xenos: it is a vertex format only, and
+  piglit draw-pixels hung the GPU through it.
+
+piglit fbo-depth, draw-pixels, getteximage-formats, vertex-program-two-side,
+glsl-fs-user-varying-ff and arb_clear_texture-depth no longer hang the GPU.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c |  7 ++-
+ .../drivers/freedreno/a2xx/fd2_screen.c       |  4 +-
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 46 ++++++++++++++++++-
+ .../drivers/freedreno/a2xx/ir2_private.h      |  1 +
+ 4 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index e9a30e3..1a1decf 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -420,9 +420,14 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_BLEND_CONTROL));
+       OUT_RING(ring, blend->rb_blendcontrol);
+ 
++      /* Xenos: without a color buffer, EDRAM color base 0 is where the depth
++       * buffer lives too; color writes there wedged the GPU (piglit fbo-depth
++       * readpixels: depth-only FBO with glDrawBuffer(GL_NONE)) */
++      struct pipe_framebuffer_state *pfb = &ctx->batch->framebuffer;
++      bool no_color = fd2_xenos && (!pfb->nr_cbufs || !pfb->cbufs[0].texture);
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_MASK));
+-      OUT_RING(ring, blend->rb_colormask);
++      OUT_RING(ring, no_color ? 0 : blend->rb_colormask);
+    }
+ 
+    if (dirty & FD_DIRTY_BLEND_COLOR) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index e7570c3..212c162 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -66,8 +66,10 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+       if (!is_xenos(fd_screen(pscreen)) || xenos_vertex_format_ok(format))
+          retval |= usage & PIPE_BIND_VERTEX_BUFFER;
+       /* the only npot blocksize supported texture format is R32G32B32_FLOAT */
++      /* (Xenos: k_32_32_32_FLOAT is a vertex format only; sampling it wedged the
++       * GPU in piglit draw-pixels) */
+       if (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+-          format == PIPE_FORMAT_R32G32B32_FLOAT)
++          (format == PIPE_FORMAT_R32G32B32_FLOAT && !is_xenos(fd_screen(pscreen))))
+          retval |= usage & PIPE_BIND_SAMPLER_VIEW;
+    }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 2c67e89..17a09c7 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include "ir2_private.h"
++#include "compiler/nir/nir_builder.h"
+ 
+ #include "fd2_program.h"
+ #include "freedreno_util.h"
+@@ -101,6 +102,32 @@ ir2_optimize_loop(nir_shader *s)
+ /* trig workarounds is the same as ir3.. but we don't want to include ir3 */
+ bool ir3_nir_apply_trig_workarounds(nir_shader *shader);
+ 
++/* Shadow samplers (GL 1.4 depth compare, GLSL shadow2D): a2xx has no compare in
++ * the texture unit, so fetch the depth and compare in the shader. Only the
++ * default GL_LEQUAL compare function is implemented (the result is
++ * ref <= depth); desktop GL needs shadow samplers, and before this ir2 aborted
++ * on them. */
++static bool
++ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
++{
++   int idx = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
++   if (idx < 0)
++      return false;
++
++   nir_def *ref = tex->src[idx].src.ssa;
++   nir_tex_instr_remove_src(tex, idx);
++   tex->is_shadow = false;
++   tex->is_new_style_shadow = false;
++
++   bool scalar = tex->def.num_components == 1;   /* new-style shadow result */
++   tex->def.num_components = 4;
++   b->cursor = nir_after_instr(&tex->instr);
++   nir_def *r = nir_b2f32(b, nir_fge(b, nir_channel(b, &tex->def, 0), ref));
++   nir_def *res = scalar ? r : nir_vec4(b, r, r, r, nir_imm_float(b, 1.0f));
++   nir_def_rewrite_uses_after(&tex->def, res);
++   return true;
++}
++
+ int
+ ir2_optimize_nir(nir_shader *s, bool lower)
+ {
+@@ -121,6 +148,7 @@ ir2_optimize_nir(nir_shader *s, bool lower)
+    if (lower) {
+       OPT_V(s, ir3_nir_apply_trig_workarounds);
+       OPT_V(s, nir_lower_tex, &tex_options);
++      OPT_V(s, nir_shader_tex_pass, ir2_lower_tex_shadow, nir_metadata_control_flow, NULL);
+    }
+ 
+    ir2_optimize_loop(s);
+@@ -610,6 +638,8 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
+    swiz_merge_p(&instr->src[0].swizzle, swiz);
+    instr->alu.write_mask = wrmask << comp;
+    instr->alu.export = idx;
++   if (ctx->so->type == MESA_SHADER_FRAGMENT)
++      ctx->color_exported = true;
+ }
+ 
+ static void
+@@ -730,9 +760,14 @@ emit_tex(struct ir2_context *ctx, nir_tex_instr *tex)
+       return;
+    }
+ 
++   bool is_1d = false;
+    switch (tex->sampler_dim) {
+    case GLSL_SAMPLER_DIM_2D:
+    case GLSL_SAMPLER_DIM_EXTERNAL:
++   case GLSL_SAMPLER_DIM_3D:   /* xyz; the fetch constant says 3D */
++      break;
++   case GLSL_SAMPLER_DIM_1D:   /* one coordinate; the fetch constant says 1D */
++      is_1d = true;
+       break;
+    case GLSL_SAMPLER_DIM_RECT:
+       is_rect = true;
+@@ -779,7 +814,7 @@ emit_tex(struct ir2_context *ctx, nir_tex_instr *tex)
+ 
+    instr = ir2_instr_create_fetch(ctx, &tex->def, TEX_FETCH);
+    instr->src[0] = src_coord;
+-   instr->src[0].swizzle = is_cube ? IR2_SWIZZLE_YXW : 0;
++   instr->src[0].swizzle = is_cube ? IR2_SWIZZLE_YXW : is_1d ? IR2_SWIZZLE_XXXX : 0;
+    instr->fetch.tex.is_cube = is_cube;
+    instr->fetch.tex.is_rect = is_rect;
+    instr->fetch.tex.samp_id = tex->sampler_index;
+@@ -1275,6 +1310,15 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+       dummy->alu.export = 0;
+    }
+ 
++   /* Xenos: a pixel shader that exports nothing (a depth-only pass: no draw
++    * buffers, so the color output was optimized away) wedges the GPU. Export
++    * a constant color; with no color buffer the write mask is 0 anyway. */
++   if (so->type == MESA_SHADER_FRAGMENT && so->is_xenos && !ctx->color_exported) {
++      struct ir2_instr *dummy = instr_create_alu(ctx, nir_op_mov, 4);
++      dummy->src[0] = load_const(ctx, (float[]){0.0f, 0.0f, 0.0f, 0.0f}, 4);
++      dummy->alu.export = 0;
++   }
++
+    ralloc_free(ctx->nir);
+ 
+    /* kill unused param input */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 6935875..2054d50 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -149,6 +149,7 @@ struct ir2_context {
+    uint16_t tex_mag_switchover;
+ 
+    int prev_export;
++   bool color_exported;   /* fragment shader wrote its color output */
+ 
+    /* RA state */
+    struct ir2_reg *live_regs[64];
+-- 
+2.53.0
+

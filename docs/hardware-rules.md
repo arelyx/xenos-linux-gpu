@@ -133,6 +133,14 @@ In the linear layout, each mip level's rows are aligned to 256 bytes (Xenia's `t
 
 After a resolve, libxenon flushes with `COHER_STATUS_HOST = 0x03000100` (bit 8, DEST_BASE_0_ENA) and waits for the busy bit to clear. At the end of a batch that works. Between draws of the same batch it sometimes never clears, and the `WAIT_REG_MEM` on it hangs the GPU for good. `0x03000000` (texture and vertex cache only), after a `CACHE_FLUSH` event, completes and gives later draws the resolved texels.
 
+### 25. A pixel shader must export something
+
+A pixel shader with no color export wedges the GPU, even with no color buffer bound. Mesa optimizes the color output away when there are no draw buffers (a depth-only pass, `glDrawBuffer(GL_NONE)`), so ir2 now exports a constant color in that case. Found with piglit `fbo-depth` and `gltest/gldepthonly.c`.
+
+### 26. `k_32_32_32_FLOAT` is a vertex format only
+
+Sampling a texture in that format (RGB32F) hangs the GPU. freedreno's a2xx allowed it as the one non-power-of-two texel size; Xenos doesn't.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
