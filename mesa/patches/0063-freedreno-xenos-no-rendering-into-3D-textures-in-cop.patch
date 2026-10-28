@@ -1,0 +1,59 @@
+From ecdc7f5df1d12b444386afe88e199aa49be27634 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 18:09:40 -0700
+Subject: [PATCH] freedreno/xenos: no rendering into 3D textures in
+ copy_region, no compressed 3D
+
+- resource_copy_region into a 3D texture went to the blitter, which
+  renders (the resolve writes the tiled layout); copy on the CPU.
+- Compressed 3D textures came out wrong; st stores them uncompressed.
+piglit copyteximage 3D passes.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c   | 8 ++++++--
+ src/gallium/drivers/freedreno/freedreno_blitter.c | 4 ++++
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 38c4c1c..5f1c847 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -76,11 +76,15 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+        * GPU in piglit draw-pixels) */
+       /* Xenos: 3-3-2 textures sampled wrong (piglit texsubimage); st falls
+        * back to a wider format */
+-      bool blocked = is_xenos(fd_screen(pscreen)) &&
++      /* Xenos: compressed 3D textures came out wrong (piglit copyteximage
++       * 3D); st stores them uncompressed */
++      bool blocked3d = is_xenos(fd_screen(pscreen)) && target == PIPE_TEXTURE_3D &&
++                       util_format_is_compressed(format);
++      bool blocked = blocked3d || (is_xenos(fd_screen(pscreen)) &&
+                      (format == PIPE_FORMAT_R3G3B2_UNORM || format == PIPE_FORMAT_B2G3R3_UNORM ||
+                       /* k_1_5_5_5 has alpha in the top bit: these put it at bit 0 */
+                       format == PIPE_FORMAT_A1B5G5R5_UNORM || format == PIPE_FORMAT_X1B5G5R5_UNORM ||
+-                      format == PIPE_FORMAT_A1R5G5B5_UNORM || format == PIPE_FORMAT_X1R5G5B5_UNORM);
++                      format == PIPE_FORMAT_A1R5G5B5_UNORM || format == PIPE_FORMAT_X1R5G5B5_UNORM));
+       if (!blocked && (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+           (format == PIPE_FORMAT_R32G32B32_FLOAT && !is_xenos(fd_screen(pscreen)))))
+          retval |= usage & PIPE_BIND_SAMPLER_VIEW;
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index 68770db..adcbbaa 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -715,6 +715,10 @@ fd_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
+          return;
+    }
+ 
++   /* Xenos: nothing renders into 3D textures (xenos_blit_3d_cpu) */
++   if (is_xenos(ctx->screen) && dst->target == PIPE_TEXTURE_3D)
++      goto fallback;
++
+    /* try blit on 3d pipe: */
+    if (fd_blitter_pipe_copy_region(ctx, dst, dst_level, dstx, dsty, dstz, src,
+                                    src_level, src_box))
+-- 
+2.53.0
+
