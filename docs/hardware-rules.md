@@ -176,6 +176,10 @@ The pixel shader's generated parameter (`SQ_CONTEXT_MISC.PARAM_GEN_POS`) holds t
 
 The texture unit computes the weight as floor(frac * 64) / 64, with no coordinate offset (`gltest/gllerp.c`). A coordinate at a texel center plus a tiny rounding error takes in 1/64 of the neighbor, up to 4/255 off for 8-bit colors; piglit's tolerance is 3/256. Adding half a step, 1/128 texel, to the coordinate makes it round instead (Mesa 0068: a per-sampler constant, zero for nearest filtering). The tfetch instruction's own offset fields are in half-texel units, too coarse for this.
 
+### 35. Rasterized depth and exported depth round differently
+
+An exported fragment depth (export 61) is stored as round(d * (2^n - 1)), as GL wants. A rasterized z, including a clear that sets the depth through `PA_CL_VPORT_ZOFFSET`, is one step off for some ranges: d * 2^n for d in (0.5, 0.5625), d * (2^n - 1) above (`gltest/glzeq.c`). Mesa 0070 clears depth with a program that exports it, so `glClearDepth(d)` matches `gl_FragDepth = d`.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

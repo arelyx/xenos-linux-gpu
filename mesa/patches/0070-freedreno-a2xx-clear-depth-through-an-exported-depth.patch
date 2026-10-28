@@ -1,0 +1,121 @@
+From 272fa75b0758cd54227b26f84fbd6349d6f0aca9 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 11:50:52 -0700
+Subject: [PATCH] freedreno/a2xx: clear depth through an exported depth on
+ Xenos
+
+Xenos stores an exported fragment depth as round(d * (2^n - 1)), but a
+rasterized z (the viewport-offset clear) is one step off for some
+values (d * 2^n in (0.5, 0.5625), for example). Clear depth with a solid
+program that exports depth from C1, so glClearDepth(d) matches
+gl_FragDepth = d. piglit depth-clear-precision-check passes.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c  |  9 ++++++++-
+ .../drivers/freedreno/a2xx/fd2_program.c       |  3 ++-
+ .../drivers/freedreno/freedreno_context.h      |  1 +
+ .../drivers/freedreno/freedreno_program.c      | 18 ++++++++++++++++++
+ 4 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index aa235bd..4a5e4cd 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -292,7 +292,9 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_INDX_OFFSET));
+    OUT_RING(ring, 0);
+ 
+-   fd2_program_emit(ctx, ring, &ctx->solid_prog);
++   fd2_program_emit(ctx, ring,
++                    (is_xenos(ctx->screen) && !fast_clear && (buffers & FD_BUFFER_DEPTH) &&
++                     ctx->solid_z_prog.fs) ? &ctx->solid_z_prog : &ctx->solid_prog);
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
+@@ -631,6 +633,11 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+          OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_ZSCALE));
+          OUT_RING(ring, fui(0.0f));
+          OUT_RING(ring, fui(depth));
++         /* Xenos: and in C1 for the depth export of solid_z_prog */
++         if (is_xenos(ctx->screen)) {
++            float z[4] = {depth, depth, depth, depth};
++            fd2_emit_alu_consts(ctx, ring, 0x480 + 4, (const uint32_t *)z, 4);
++         }
+       }
+ 
+       if (buffers & FD_BUFFER_STENCIL) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 7abb329..803a7f0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -292,7 +292,8 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+    f = &fp->variant[0].f;
+ 
+    /* clear/gmem2mem/mem2gmem need to be changed to remove this condition */
+-   if (prog != &ctx->solid_prog && prog != &ctx->blit_prog[0] && prog != &ctx->blit_z) {
++   if (prog != &ctx->solid_prog && prog != &ctx->solid_z_prog &&
++       prog != &ctx->blit_prog[0] && prog != &ctx->blit_z) {
+       patch_fetches(ctx, vpi, ctx->vtx.vtx, &ctx->tex[MESA_SHADER_VERTEX]);
+       if (fp)
+          patch_fetches(ctx, fpi, NULL, &ctx->tex[MESA_SHADER_FRAGMENT]);
+diff --git a/src/gallium/drivers/freedreno/freedreno_context.h b/src/gallium/drivers/freedreno/freedreno_context.h
+index 79529aa..326a665 100644
+--- a/src/gallium/drivers/freedreno/freedreno_context.h
++++ b/src/gallium/drivers/freedreno/freedreno_context.h
+@@ -317,6 +317,7 @@ struct fd_context {
+    /* shaders used by clear, and gmem->mem blits: */
+    struct fd_program_stateobj solid_prog; // TODO move to screen?
+    struct fd_program_stateobj solid_layered_prog;
++   struct fd_program_stateobj solid_z_prog;   /* Xenos: clear with exported depth */
+ 
+    /* shaders used by mem->gmem blits: */
+    struct fd_program_stateobj
+diff --git a/src/gallium/drivers/freedreno/freedreno_program.c b/src/gallium/drivers/freedreno/freedreno_program.c
+index 45e442a..84294d0 100644
+--- a/src/gallium/drivers/freedreno/freedreno_program.c
++++ b/src/gallium/drivers/freedreno/freedreno_program.c
+@@ -120,6 +120,18 @@ static const char *solid_fs = "FRAG                                        \n"
+                               "  0: MOV OUT[0], CONST[0]                   \n"
+                               "  1: END                                    \n";
+ 
++/* Xenos stores a rasterized z with its own rounding, which differs from the
++ * z * (2^n - 1) of an exported depth by one step for some values: clear depth
++ * through the export so that gl_FragDepth = d matches glClearDepth(d) */
++static const char *solid_z_fs = "FRAG                                        \n"
++                                "PROPERTY FS_COLOR0_WRITES_ALL_CBUFS 1       \n"
++                                "DCL CONST[0..1]                             \n"
++                                "DCL OUT[0], COLOR                           \n"
++                                "DCL OUT[1], POSITION                        \n"
++                                "  0: MOV OUT[0], CONST[0]                   \n"
++                                "  1: MOV OUT[1].z, CONST[1].xxxx            \n"
++                                "  2: END                                    \n";
++
+ static const char *solid_vs = "VERT                                        \n"
+                               "DCL IN[0]                                   \n"
+                               "DCL OUT[0], POSITION                        \n"
+@@ -294,6 +306,10 @@ fd_prog_init(struct pipe_context *pctx)
+ 
+    ctx->solid_prog.fs = assemble_tgsi(pctx, solid_fs, true);
+    ctx->solid_prog.vs = assemble_tgsi(pctx, solid_vs, false);
++   if (is_xenos(ctx->screen)) {
++      ctx->solid_z_prog.fs = assemble_tgsi(pctx, solid_z_fs, true);
++      ctx->solid_z_prog.vs = ctx->solid_prog.vs;
++   }
+ 
+    if (ctx->screen->gen >= 6) {
+       ctx->solid_layered_prog.fs = assemble_tgsi(pctx, solid_fs, true);
+@@ -337,6 +353,8 @@ fd_prog_fini(struct pipe_context *pctx)
+ 
+    pctx->delete_vs_state(pctx, ctx->solid_prog.vs);
+    pctx->delete_fs_state(pctx, ctx->solid_prog.fs);
++   if (ctx->solid_z_prog.fs)
++      pctx->delete_fs_state(pctx, ctx->solid_z_prog.fs);
+ 
+    if (ctx->screen->gen >= 6) {
+       pctx->delete_vs_state(pctx, ctx->solid_layered_prog.vs);
+-- 
+2.53.0
+
