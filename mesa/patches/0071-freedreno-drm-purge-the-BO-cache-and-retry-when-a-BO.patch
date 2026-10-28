@@ -1,0 +1,52 @@
+From cc3201f70d07fee97809b6536ab800652a73fb1c Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 13:00:15 -0700
+Subject: [PATCH] freedreno/drm: purge the BO cache and retry when a BO
+ allocation fails
+
+Xenos has a 48 MB GPU pool. When the kernel refuses a buffer, give back
+the buffers cached for reuse and try once more at the requested size
+rather than the bucket-rounded one (a 21 MB texture asked for 24 MB).
+piglit tex3d-maxsize allocates, deletes and reallocates its largest
+texture, and failed on the cached copy.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/freedreno/drm/freedreno_bo.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/drm/freedreno_bo.c b/src/freedreno/drm/freedreno_bo.c
+index 6eda810..d1596c7 100644
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -137,13 +137,23 @@ bo_new(struct fd_device *dev, uint32_t size, uint32_t flags,
+    if ((flags & FD_BO_CACHED_COHERENT) && !dev->has_cached_coherent)
+       flags &= ~FD_BO_CACHED_COHERENT;
+ 
++   uint32_t req_size = size;
+    bo = fd_bo_cache_alloc(cache, &size, flags);
+    if (bo)
+       return bo;
+ 
+    bo = dev->funcs->bo_new(dev, size, flags);
+-   if (!bo)
+-      return NULL;
++   if (!bo) {
++      /* out of GPU memory (Xenos has a 48 MB pool): give back the buffers
++       * cached for reuse and try once more, without the rounding up to the
++       * cache bucket size (21 MB became 24 MB: dEQP texture.size 2048x2048
++       * mipmap cases, piglit tex3d-maxsize) */
++      fd_device_purge(dev);
++      size = req_size;
++      bo = dev->funcs->bo_new(dev, size, flags);
++      if (!bo)
++         return NULL;
++   }
+ 
+    simple_mtx_lock(&table_lock);
+    /* add ourself into the handle table: */
+-- 
+2.53.0
+

@@ -469,8 +469,12 @@ static struct drm_gem_dma_object *xe_pool_gem_create(struct drm_device *dev, siz
 	size = PAGE_ALIGN(size);
 	align.align = min_t(size_t, roundup_pow_of_two(size), 2u << 20);
 	v = gen_pool_alloc_algo(xe_pool, size, gen_pool_first_fit_align, &align);
-	if (!v)
+	if (!v) {
+		if (msm_debug)
+			pr_info("xegpu: pool has no %zu KB block (%zu KB free)\n", size >> 10,
+				gen_pool_avail(xe_pool) >> 10);
 		return NULL;
+	}
 	xo = kzalloc(sizeof(*xo), GFP_KERNEL);
 	if (!xo) {
 		gen_pool_free(xe_pool, v, size);

@@ -14,6 +14,8 @@
  * user, not a security boundary.
  */
 #include <linux/module.h>
+#include <linux/sort.h>
+#include <linux/vmalloc.h>
 #include <linux/pci.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
@@ -473,6 +475,8 @@ MODULE_PARM_DESC(pool_mb, "MB of contiguous GPU memory to reserve at load (16MB 
 static struct gen_pool *xe_pool;
 static struct { void *virt; dma_addr_t dma; u32 size; } pool_chunks[POOL_MAX_CHUNKS];
 static int pool_nchunks;
+static void *pool_vmaps[POOL_MAX_CHUNKS];   /* merged ranges of adjacent chunks */
+static int pool_nvmaps;
 
 /* /sys/module/xegpu/parameters/pool_free_kb: what the pool has left (for
  * finding leaks and fragmentation over long uptimes) */
@@ -483,6 +487,12 @@ static int pool_free_get(char *buf, const struct kernel_param *kp)
 }
 static const struct kernel_param_ops pool_free_ops = { .get = pool_free_get };
 module_param_cb(pool_free_kb, &pool_free_ops, NULL, 0444);
+
+static int pool_chunk_cmp(const void *a, const void *b)
+{
+	const typeof(pool_chunks[0]) *x = a, *y = b;
+	return x->dma < y->dma ? -1 : x->dma > y->dma;
+}
 
 static void pool_create(void)
 {
@@ -507,7 +517,7 @@ static void pool_create(void)
 		}
 		if (!v)
 			break;
-		if (upper_32_bits(d) || gen_pool_add_virt(xe_pool, (unsigned long)v, d, sz, -1)) {
+		if (upper_32_bits(d)) {
 			dma_free_coherent(&xe_pdev->dev, sz, v, d);
 			break;
 		}
@@ -515,6 +525,44 @@ static void pool_create(void)
 		pool_chunks[pool_nchunks].dma = d;
 		pool_chunks[pool_nchunks].size = sz;
 		pool_nchunks++;
+	}
+	/* 16MB (the largest buddy block with 64K pages) is the largest buffer a
+	 * single chunk holds: hand physically adjacent chunks to the pool as one
+	 * range so that a 2048x2048 RGBA texture with mipmaps (21MB) fits */
+	sort(pool_chunks, pool_nchunks, sizeof(pool_chunks[0]), pool_chunk_cmp, NULL);
+	for (i = 0; i < pool_nchunks;) {
+		int j = i + 1;
+		size_t len = pool_chunks[i].size;
+		void *v = pool_chunks[i].virt;
+		while (j < pool_nchunks && pool_chunks[j].dma == pool_chunks[i].dma + len)
+			len += pool_chunks[j++].size;
+		/* the coherent allocations are separate kernel mappings: map the
+		 * merged range once more, with the same attributes */
+		if (j - i > 1) {
+			unsigned long k, n = len >> PAGE_SHIFT;
+			struct page **pages = kvmalloc_array(n, sizeof(*pages), GFP_KERNEL);
+			void *m = NULL;
+			if (pages) {
+				for (k = 0; k < n; k++)
+					pages[k] = pfn_to_page(PHYS_PFN(pool_chunks[i].dma) + k);
+				m = vmap(pages, n, VM_MAP, pgprot_dmacoherent(PAGE_KERNEL));
+				kvfree(pages);
+			}
+			if (m && pool_nvmaps < POOL_MAX_CHUNKS) {
+				v = m;
+				pool_vmaps[pool_nvmaps++] = m;
+			} else {
+				if (m)
+					vunmap(m);
+				j = i + 1;
+				len = pool_chunks[i].size;
+			}
+		}
+		pr_info("xegpu: pool range %08llx + %zu KB (%d chunks)\n",
+			(u64)pool_chunks[i].dma, len >> 10, j - i);
+		if (gen_pool_add_virt(xe_pool, (unsigned long)v, pool_chunks[i].dma, len, -1))
+			pr_err("xegpu: gen_pool_add_virt failed\n");
+		i = j;
 	}
 	pr_info("xegpu: reserved %zu KB contiguous GPU memory in %d chunks\n",
 		gen_pool_size(xe_pool) >> 10, pool_nchunks);
@@ -531,6 +579,9 @@ static void pool_destroy(void)
 	}
 	gen_pool_destroy(xe_pool);
 	xe_pool = NULL;
+	for (i = 0; i < pool_nvmaps; i++)
+		vunmap(pool_vmaps[i]);
+	pool_nvmaps = 0;
 	for (i = 0; i < pool_nchunks; i++)
 		dma_free_coherent(&xe_pdev->dev, pool_chunks[i].size, pool_chunks[i].virt, pool_chunks[i].dma);
 	pool_nchunks = 0;

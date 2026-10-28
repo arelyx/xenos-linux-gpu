@@ -180,6 +180,10 @@ The texture unit computes the weight as floor(frac * 64) / 64, with no coordinat
 
 An exported fragment depth (export 61) is stored as round(d * (2^n - 1)), as GL wants. A rasterized z, including a clear that sets the depth through `PA_CL_VPORT_ZOFFSET`, is one step off for some ranges: d * 2^n for d in (0.5, 0.5625), d * (2^n - 1) above (`gltest/glzeq.c`). Mesa 0070 clears depth with a program that exports it, so `glClearDepth(d)` matches `gl_FragDepth = d`.
 
+### 36. The GPU pool is three 16 MB blocks, adjacent in practice
+
+With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB pool as three `dma_alloc_coherent` blocks. `gen_pool` never places one buffer across two chunks, so a 2048x2048 RGBA texture (16 MB, 21 MB with mipmaps) could not be allocated even with the pool empty. The blocks came out physically adjacent (`0x13000000`..`0x16000000`); the module sorts them, maps each adjacent run once more with `vmap` and the coherent attributes, and adds it to the pool as one range (`dmesg`: `pool range 13000000 + 49152 KB (3 chunks)`).
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
