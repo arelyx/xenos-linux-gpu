@@ -15,11 +15,11 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | Kernel | Linux 6.18.58 + Free60 xenon patch, netbooted by Xell, Debian unstable ppc64 on NFS |
 | GPU driver | `xegpu.ko`: CP microcode and ring, fences on interrupts, boot-time contiguous pool, KMS display, msm UAPI subset with a command checker |
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 and desktop OpenGL 2.0 (EGL, GLX), in X windows through DRI3 |
-| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 99.8% of executed cases pass (17,039 of 17,075), no GPU hangs (`conformance/results/full12-report.txt`; 98.0% before the performance work). about 37 cases still fail, listed in docs/conformance.md |
+| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 99.8% of executed cases pass (17,042 of 17,075), no GPU hangs (`conformance/results/full25-report.txt`). About 33 cases still fail, listed in docs/conformance.md |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
 | Performance | Four rounds ([docs/performance.md](docs/performance.md)): fills, text, composites, large copies, scrolls and uploads beat CPU rendering (rect10 2.9M/s vs 1.7M, aa10text 839k vs 290k, scroll500 5,480 vs 904); tiny copies, tiny uploads and readback still lose. glmark2-es2: 31 of 32 scenes run, 112-928 FPS at 1280x720 |
 | Desktop | IceWM on glamor by default (Xfce works but 458 MB is tight), GLES and GLX apps on the GPU in X windows |
-| Desktop GL | OpenGL 2.0 / GLSL 1.20; piglit GL 2.0 subset: about 71% of executed tests pass, no GPU hangs (`docs/conformance.md`) |
+| Desktop GL | OpenGL 2.0 / GLSL 1.20; piglit GL 2.0 subset: 89.4% of executed tests pass (1,018 of 1,139), no GPU hangs (`docs/conformance.md`) |
 | Not done | ETC1, 4 KB-page kernel (does not boot yet), GL 2.1+, Vulkan (never) |
 
 Nothing here writes to the console's NAND. The only change to the softmod is one byte in a file on the hard disk (see [docs/setup.md](docs/setup.md)).
