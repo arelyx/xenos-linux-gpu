@@ -39,10 +39,11 @@ def load_tests(path, flt):
         cmd = ast.literal_eval(opts.get("command", "[]"))
         if not cmd:
             continue
-        if t.get("type") == "gl":
-            cmd = cmd + ["-auto", "-fbo"]
-        elif t.get("type") == "shader":
-            cmd = cmd + ["-auto", "-fbo"]
+        # as piglit's PiglitGLTest: -fbo only for concurrent tests; the
+        # others (fbo-blit-stretch reads framebuffer 0) run in the window
+        flags = ["-auto", "-fbo"] if opts.get("run_concurrent") != "False" else ["-auto"]
+        if t.get("type") in ("gl", "shader"):
+            cmd = cmd + flags
         tests.append((name, cmd))
     return tests
 

@@ -107,3 +107,5 @@ Sixteenth pass (gl20-16, Mesa 0066: 132 vertex uniform vectors, plus the xegpu `
 
 Seventeenth pass (gl20-17, Mesa 0067: flush a batch once its draw ring holds more than 4 MB): 1,021 pass, **89.6%** of executed. The four bias shadow cases pass again with about 170 MB of RAM free throughout. dEQP full28: identical to full27.
 
+
+Harness fix after gl20-17: `piglit-run.py` passed `-fbo` to every test, but upstream piglit adds it only to tests marked `run_concurrent`. 185 tests in the GL 2.0 list are not; some of them check their result by reading framebuffer 0, which under `-fbo` is the GBM window rather than the framebuffer they drew to. Rerun in window mode as upstream does, three more pass (`fcc-front-buffer-distraction`, `get-attachment-parameter-default-framebuffer`, `fbo-scissor-blit window`): **1,024 pass, 89.9%** of executed. `fbo-blit-stretch` then fails only its 15 stretched `GL_LINEAR` cases, each by about 4/255: the bilinear weights look 6-bit and truncated (1/8 comes out as 7/64). `tex-upside-down-miptree` fails only at base level 6, where Mesa sizes level 0 at 4096x4096 RGBA, more than 64 MB, which does not fit the 48 MB contiguous pool.

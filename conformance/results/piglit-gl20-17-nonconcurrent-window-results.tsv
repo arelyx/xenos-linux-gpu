@@ -1,0 +1,185 @@
+fast_color_clear@fcc-front-buffer-distraction	pass
+fast_color_clear@fcc-read-to-pbo-after-clear	pass
+hiz@hiz-depth-read-window-stencil0	pass
+hiz@hiz-depth-read-window-stencil1	pass
+hiz@hiz-depth-test-window-stencil0	pass
+hiz@hiz-depth-test-window-stencil1	pass
+hiz@hiz-stencil-read-window-depth0	pass
+hiz@hiz-stencil-read-window-depth1	pass
+hiz@hiz-stencil-test-window-depth0	pass
+hiz@hiz-stencil-test-window-depth1	pass
+security@initialized-fbo	warn
+security@initialized-texmemory	warn
+security@initialized-vbo	warn
+spec@!opengl 1.0@gl-1.0-drawbuffer-modes	fail
+spec@!opengl 1.0@gl-1.0-front-invalidate-back	pass
+spec@!opengl 1.0@gl-1.0-swapbuffers-behavior	fail
+spec@!opengl 1.1@clear-accum	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit	pass
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-blit samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear	pass
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-clear samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels	pass
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-copypixels samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8	fail
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-32f_24_8_rev samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort	fail
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8	pass
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-24_8 samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-32f_24_8_rev samples=8	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort	pass
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=16	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=2	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=32	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=4	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=6	skip
+spec@!opengl 1.1@depthstencil-default_fb-readpixels-float-and-ushort samples=8	skip
+spec@!opengl 1.1@linestipple	fail
+spec@!opengl 1.1@masked-clear	pass
+spec@!opengl 1.1@read-front	fail
+spec@!opengl 1.1@read-front clear-front-first	fail
+spec@!opengl 1.1@read-front clear-front-first samples=16	skip
+spec@!opengl 1.1@read-front clear-front-first samples=2	skip
+spec@!opengl 1.1@read-front clear-front-first samples=32	skip
+spec@!opengl 1.1@read-front clear-front-first samples=4	skip
+spec@!opengl 1.1@read-front clear-front-first samples=6	skip
+spec@!opengl 1.1@read-front clear-front-first samples=8	skip
+spec@!opengl 1.1@read-front samples=16	skip
+spec@!opengl 1.1@read-front samples=2	skip
+spec@!opengl 1.1@read-front samples=32	skip
+spec@!opengl 1.1@read-front samples=4	skip
+spec@!opengl 1.1@read-front samples=6	skip
+spec@!opengl 1.1@read-front samples=8	skip
+spec@!opengl 1.2@tex3d-maxsize	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 1024 d=z16	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 1024 d=z24	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 146 d=z16	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 146 d=z24	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 273 d=z16	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 273 d=z24	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 292 d=z16	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 292 d=z24	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 585 d=z16	pass
+spec@arb_depth_texture@depthstencil-render-miplevels 585 d=z24	pass
+spec@arb_framebuffer_object@arb_framebuffer_object-get-attachment-parameter-default-framebuffer	pass
+spec@arb_framebuffer_object@fbo-blit-stretch	fail
+spec@arb_framebuffer_object@fbo-scissor-blit window	pass
+spec@arb_texture_cube_map@copyteximage cube	pass
+spec@arb_texture_cube_map@copyteximage cube samples=16	skip
+spec@arb_texture_cube_map@copyteximage cube samples=2	skip
+spec@arb_texture_cube_map@copyteximage cube samples=32	skip
+spec@arb_texture_cube_map@copyteximage cube samples=4	skip
+spec@arb_texture_cube_map@copyteximage cube samples=6	skip
+spec@arb_texture_cube_map@copyteximage cube samples=8	skip
+spec@arb_texture_multisample@large-float-texture	skip
+spec@arb_texture_multisample@large-float-texture-array	skip
+spec@arb_texture_multisample@large-float-texture-array-fp16	skip
+spec@arb_texture_multisample@large-float-texture-fp16	skip
+spec@arb_texture_rectangle@copyteximage rect	pass
+spec@arb_texture_rectangle@copyteximage rect samples=16	skip
+spec@arb_texture_rectangle@copyteximage rect samples=2	skip
+spec@arb_texture_rectangle@copyteximage rect samples=32	skip
+spec@arb_texture_rectangle@copyteximage rect samples=4	skip
+spec@arb_texture_rectangle@copyteximage rect samples=6	skip
+spec@arb_texture_rectangle@copyteximage rect samples=8	skip
+spec@ext_framebuffer_blit@fbo-copypix	pass
+spec@ext_framebuffer_blit@fbo-readdrawpix	pass
+spec@ext_framebuffer_blit@fbo-sys-blit	pass
+spec@ext_framebuffer_blit@fbo-sys-sub-blit	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 d=s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 d=z24_s8_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 d=z24_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 ds=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 s=d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 s=z24_s8_d=z24	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 1024 s=z24_s8_d=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 d=s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 d=z24_s8_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 d=z24_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 ds=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 s=d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 s=z24_s8_d=z24	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 146 s=z24_s8_d=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 d=s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 d=z24_s8_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 d=z24_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 ds=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 s=d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 s=z24_s8_d=z24	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 273 s=z24_s8_d=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 d=s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 d=z24_s8_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 d=z24_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 ds=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 s=d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 s=z24_s8_d=z24	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 292 s=z24_s8_d=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 d=s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 d=z24_s8_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 d=z24_s=z24_s8	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 ds=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 s=d=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 s=z24_s8	pass
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 s=z24_s8_d=z24	skip
+spec@ext_packed_depth_stencil@depthstencil-render-miplevels 585 s=z24_s8_d=z24_s8	skip
+spec@ext_packed_depth_stencil@fbo-blit-d24s8	pass
+spec@glsl-1.20@recursion@indirect	pass
+spec@glsl-1.20@recursion@indirect-complex	pass
+spec@glsl-1.20@recursion@indirect-complex-separate	pass
+spec@glsl-1.20@recursion@indirect-separate	pass
+spec@glsl-1.20@recursion@simple	pass
+spec@glsl-1.20@recursion@unreachable	pass
+spec@glsl-1.20@recursion@unreachable-constant-folding	pass
