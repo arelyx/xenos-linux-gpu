@@ -474,6 +474,16 @@ static struct gen_pool *xe_pool;
 static struct { void *virt; dma_addr_t dma; u32 size; } pool_chunks[POOL_MAX_CHUNKS];
 static int pool_nchunks;
 
+/* /sys/module/xegpu/parameters/pool_free_kb: what the pool has left (for
+ * finding leaks and fragmentation over long uptimes) */
+static int pool_free_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "%zu of %zu\n", xe_pool ? gen_pool_avail(xe_pool) >> 10 : 0,
+			  xe_pool ? gen_pool_size(xe_pool) >> 10 : 0);
+}
+static const struct kernel_param_ops pool_free_ops = { .get = pool_free_get };
+module_param_cb(pool_free_kb, &pool_free_ops, NULL, 0444);
+
 static void pool_create(void)
 {
 	int i, want = DIV_ROUND_UP(pool_mb << 20, POOL_CHUNK);
