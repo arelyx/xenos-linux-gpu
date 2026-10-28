@@ -1,0 +1,36 @@
+From c59701927ddf88f6883f8f1e37f8e372f25233a4 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 19:27:22 -0700
+Subject: [PATCH 65/65] freedreno/xenos: 1D textures tiled only for depth
+
+A tiled 1D texture takes 32 rows; piglit tex-miplevel-selection 1DShadow
+got OOM-killed in full runs. Only depth needs the tiled path (CPU
+conversion), color 1D textures go back to linear.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_resource.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+index 56d5607..dc84f57 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_resource.c
+@@ -80,7 +80,11 @@ fd2_tile_mode(const struct pipe_resource *tmpl)
+     * only on the tiled path (freedreno_resource.c xenos_tile_copy). */
+    if (fd2_xenos && (tmpl->bind & PIPE_BIND_SAMPLER_VIEW) && tmpl->usage != PIPE_USAGE_STAGING &&
+        (tmpl->target == PIPE_TEXTURE_2D || tmpl->target == PIPE_TEXTURE_CUBE ||
+-        tmpl->target == PIPE_TEXTURE_RECT || tmpl->target == PIPE_TEXTURE_1D) &&
++        tmpl->target == PIPE_TEXTURE_RECT ||
++        /* 1D only for depth (its CPU conversion is on the tiled path): a
++         * tiled 1D texture takes 32 rows (piglit tex-miplevel-selection
++         * 1DShadow got OOM-killed in full runs) */
++        (tmpl->target == PIPE_TEXTURE_1D && util_format_is_depth_or_stencil(tmpl->format))) &&
+        !util_format_is_compressed(tmpl->format))
+       return 1;
+    /* we can enable tiling for any resource we can render to */
+-- 
+2.53.0
+

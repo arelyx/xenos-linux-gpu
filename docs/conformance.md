@@ -101,3 +101,5 @@ Thirteenth pass (gl20-13, Mesa 0059 and 0060: destination alpha is 1 in color bu
 
 Fourteenth pass (gl20-14, Mesa 0061 and the first version of 0062): 1,018 pass, **89.4%** of executed; `gl-1.4-polygon-offset` regressed because the depth export pass then covered the whole framebuffer and its float depth can come back one step off. The final 0062 runs the pass only over the columns the strips can't reach; with it the 608 depth/stencil/offset piglit tests match gl20-13 and a half sample of dEQP depth/stencil/fbo cases matches full24 (apart from the order-dependent `rbo_rgba4_depth_component16`). dEQP full25: 99.8%.
 
+Fifteenth pass (gl20-15, Mesa 0062 final, 0063 and 0064: native quads, quad strips and polygons, so line polygon mode draws only their outer edges): 1,020 pass, **89.6%** of executed. The one non-pass that had passed, `tex-miplevel-selection 1dshadow`, was killed by the OOM killer again: a tiled 1D texture takes 32 rows. Mesa 0065 keeps tiling for 1D depth textures only; the 48 1D/miplevel tests match gl20-14. dEQP full26: 99.8%, no regressions apart from a `texture.size.cube` case out of GPU memory.
+

@@ -1,0 +1,72 @@
+From bb817d9921d5ddfa71a0331f53d0a4d335482e6c Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 18:41:41 -0700
+Subject: [PATCH 64/65] freedreno/xenos: native quads, quad strips and polygons
+
+Xenos draws them itself (Xenia kQuadList 0x0d, kQuadStrip 0x0e, kPolygon
+0x0f). In line polygon mode only their outer edges are drawn, which the
+triangles Mesa split them into couldn't do (piglit polygon-mode; a quad in
+line mode lit 237 pixels, the diagonal included, now 191). Long quad
+lists/strips split in multiples of 4; long polygons go through the
+triangle-list conversion like fans.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c   | 4 ++++
+ src/gallium/drivers/freedreno/a2xx/fd2_screen.c | 6 ++++++
+ src/gallium/drivers/freedreno/freedreno_draw.c  | 3 ++-
+ 3 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index e83a2aa..aa235bd 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -220,8 +220,12 @@ fd2_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *pinfo,
+          [MESA_PRIM_LINE_STRIP]     = 32765,
+          [MESA_PRIM_TRIANGLE_STRIP] = 32764,
+ 
++         [MESA_PRIM_QUADS]          = 32764,
++         [MESA_PRIM_QUAD_STRIP]     = 32764,
++
+          /* needs more work */
+          [MESA_PRIM_TRIANGLE_FAN]   = 0,
++         [MESA_PRIM_POLYGON]        = 0,
+          [MESA_PRIM_LINE_LOOP]      = 0,
+       };
+       /* clang-format on */
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index 5f1c847..94b6242 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -150,6 +150,12 @@ static const enum pc_di_primtype xenos_primtypes[MESA_PRIM_COUNT] = {
+    [MESA_PRIM_TRIANGLES]      = DI_PT_TRILIST,
+    [MESA_PRIM_TRIANGLE_STRIP] = DI_PT_TRISTRIP,
+    [MESA_PRIM_TRIANGLE_FAN]   = DI_PT_TRIFAN,
++   /* native quads and polygons (Xenia kQuadList, kQuadStrip, kPolygon): in
++    * line or point polygon mode only their outer edges are drawn, which the
++    * triangles Mesa would split them into can't do */
++   [MESA_PRIM_QUADS]          = 0x0d,
++   [MESA_PRIM_QUAD_STRIP]     = 0x0e,
++   [MESA_PRIM_POLYGON]        = 0x0f,
+ };
+ /* clang-format on */
+ 
+diff --git a/src/gallium/drivers/freedreno/freedreno_draw.c b/src/gallium/drivers/freedreno/freedreno_draw.c
+index 24c640f..5e5259f 100644
+--- a/src/gallium/drivers/freedreno/freedreno_draw.c
++++ b/src/gallium/drivers/freedreno/freedreno_draw.c
+@@ -401,7 +401,8 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+    if (!fd_render_condition_check(pctx))
+       return;
+ 
+-   if (is_xenos(ctx->screen) && info->mode == MESA_PRIM_TRIANGLE_FAN && num_draws == 1 &&
++   if (is_xenos(ctx->screen) &&
++       (info->mode == MESA_PRIM_TRIANGLE_FAN || info->mode == MESA_PRIM_POLYGON) && num_draws == 1 &&
+        !indirect && !info->primitive_restart && draws[0].count > 32766 &&
+        xenos_draw_long_fan(pctx, info, &draws[0]))
+       return;
+-- 
+2.53.0
+
