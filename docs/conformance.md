@@ -97,3 +97,5 @@ Eleventh pass (gl20-11, Mesa 0057: polygon offset slope in 1/16-pixel units, tri
 
 Twelfth pass (gl20-12, Mesa 0058: 128 vertex / 112 fragment uniform vectors, the gl_FragCoord.z viewport constants moved from C65/C66 to C254/C255, two ir2 stack overflows on big shaders fixed): 1,009 pass, **88.6%** of executed, no regressions. dEQP full23: 99.8%; two large `texture.size` cases out of GPU memory this run, and `uniform_api.random.3` now links and aborts in register allocation instead of failing to compile.
 
+Thirteenth pass (gl20-13, Mesa 0059 and 0060: destination alpha is 1 in color buffers without alpha; 16-bit packed textures had red and blue swapped, and the 1-5-5-5 formats with alpha at bit 0 don't match `k_1_5_5_5`): 1,016 pass, **89.2%** of executed, 7 fixed, no regressions. dEQP full24: 99.8%, no regressions.
+

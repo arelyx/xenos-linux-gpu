@@ -1,0 +1,77 @@
+From 644d6b6c039a0c001d604bae991195dcd9b46663 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 16:23:43 -0700
+Subject: [PATCH] freedreno/xenos: 16-bit packed texture formats
+
+- Red and blue came out swapped for 16-bit packed formats with three or
+  more channels (565, 4444): the big-endian format descriptions order the
+  channels differently from what the texture unit sees after its endian
+  swap. Swap them in the fetch swizzle.
+- k_1_5_5_5 has alpha in the top bit; A1B5G5R5/X1B5G5R5/A1R5G5B5/X1R5G5B5
+  put it at bit 0, so they aren't sampler formats (st picks another).
+piglit fbo-generatemipmap-formats (RGB5, RGB565, RGB5_A1) passes.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/fd2_screen.c       |  5 ++++-
+ src/gallium/drivers/freedreno/a2xx/fd2_util.c | 19 ++++++++++++++++++-
+ 2 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+index f767e40..38c4c1c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_screen.c
+@@ -77,7 +77,10 @@ fd2_screen_is_format_supported(struct pipe_screen *pscreen,
+       /* Xenos: 3-3-2 textures sampled wrong (piglit texsubimage); st falls
+        * back to a wider format */
+       bool blocked = is_xenos(fd_screen(pscreen)) &&
+-                     (format == PIPE_FORMAT_R3G3B2_UNORM || format == PIPE_FORMAT_B2G3R3_UNORM);
++                     (format == PIPE_FORMAT_R3G3B2_UNORM || format == PIPE_FORMAT_B2G3R3_UNORM ||
++                      /* k_1_5_5_5 has alpha in the top bit: these put it at bit 0 */
++                      format == PIPE_FORMAT_A1B5G5R5_UNORM || format == PIPE_FORMAT_X1B5G5R5_UNORM ||
++                      format == PIPE_FORMAT_A1R5G5B5_UNORM || format == PIPE_FORMAT_X1R5G5B5_UNORM);
+       if (!blocked && (util_is_power_of_two_or_zero(util_format_get_blocksize(format)) ||
+           (format == PIPE_FORMAT_R32G32B32_FLOAT && !is_xenos(fd_screen(pscreen)))))
+          retval |= usage & PIPE_BIND_SAMPLER_VIEW;
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_util.c b/src/gallium/drivers/freedreno/a2xx/fd2_util.c
+index 92c5500..41349d4 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_util.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_util.c
+@@ -10,6 +10,8 @@
+ #include "util/format/u_format.h"
+ 
+ #include "fd2_util.h"
++#include "util/u_endian.h"
++#include <string.h>
+ 
+ static enum a2xx_sq_surfaceformat
+ pipe2surface(enum pipe_format format, struct surface_format *fmt)
+@@ -204,7 +206,22 @@ fd2_tex_swiz(enum pipe_format format, unsigned swizzle_r, unsigned swizzle_g,
+       swizzle_a,
+    }, rswiz[4];
+ 
+-   util_format_compose_swizzles(desc->swizzle, swiz, rswiz);
++   unsigned char fswiz[4];
++   memcpy(fswiz, desc->swizzle, 4);
++#if UTIL_ARCH_BIG_ENDIAN
++   /* 16-bit packed formats with red and blue (565, 5551, 4444): the
++    * big-endian descriptions put them in the wrong order for the texture
++    * unit, red and blue came out swapped (piglit fbo-generatemipmap-formats:
++    * RGB5, RGB565, RGB5_A1) */
++   if (desc->layout == UTIL_FORMAT_LAYOUT_PLAIN && !desc->is_array &&
++       desc->block.bits == 16 && desc->nr_channels >= 3 &&
++       !util_format_is_depth_or_stencil(format)) {
++      unsigned char t = fswiz[0];
++      fswiz[0] = fswiz[2];
++      fswiz[2] = t;
++   }
++#endif
++   util_format_compose_swizzles(fswiz, swiz, rswiz);
+ 
+    return A2XX_SQ_TEX_3_SWIZ_X(tex_swiz(rswiz[0])) |
+           A2XX_SQ_TEX_3_SWIZ_Y(tex_swiz(rswiz[1])) |
+-- 
+2.53.0
+
