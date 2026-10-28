@@ -1,0 +1,168 @@
+From f3dc3ddd48de028e865141fe6ce20ba0f3a23179 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 17:10:52 -0700
+Subject: [PATCH] freedreno/xenos: blits into and out of 3D textures on the CPU
+
+3D textures are linear and a resolve writes the tiled layout, so rendering
+into them can't work, but st still blits into 3D resources (format
+conversion on upload, readback through a 3D staging texture): the data
+came out in 4-texel tile runs. Do 3D blits on the CPU with
+util_format_unpack/pack_rgba and nearest scaling. The Xenos transfer path
+also (de)tiles every layer of a box now, not only depth 1.
+piglit texsubimage, texsubimage-unpack pass; texture-packed-formats 3D
+drops from about 1100 failing probes to 216.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/freedreno_blitter.c     | 56 +++++++++++++++++++
+ .../drivers/freedreno/freedreno_resource.c    | 23 ++++++--
+ 2 files changed, 74 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_blitter.c b/src/gallium/drivers/freedreno/freedreno_blitter.c
+index d229ba4..68770db 100644
+--- a/src/gallium/drivers/freedreno/freedreno_blitter.c
++++ b/src/gallium/drivers/freedreno/freedreno_blitter.c
+@@ -441,6 +441,57 @@ fd_blit_stencil_fallback(struct fd_context *ctx, const struct pipe_blit_info *in
+       info->scissor_enable ? &info->scissor : NULL);
+ }
+ 
++/* Xenos: 3D textures are linear and a resolve writes the tiled layout, so
++ * nothing can render into them. st still blits into 3D resources (format
++ * conversion on upload, readback into a 3D staging texture); do those on
++ * the CPU (piglit texsubimage, texture-packed-formats 3D). */
++static bool
++xenos_blit_3d_cpu(struct fd_context *ctx, const struct pipe_blit_info *info)
++   assert_dt
++{
++   struct pipe_context *pctx = &ctx->base;
++   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
++   if (sb->width <= 0 || sb->height <= 0 || sb->depth <= 0 ||
++       db->width <= 0 || db->height <= 0 || db->depth <= 0 ||
++       util_format_is_depth_or_stencil(info->dst.format) ||
++       util_format_is_compressed(info->src.format) || util_format_is_compressed(info->dst.format) ||
++       info->scissor_enable)
++      return false;
++
++   struct pipe_transfer *st_, *dt_;
++   uint8_t *src = pipe_texture_map_3d(pctx, info->src.resource, info->src.level, PIPE_MAP_READ,
++                                      sb->x, sb->y, sb->z, sb->width, sb->height, sb->depth, &st_);
++   if (!src)
++      return false;
++   uint8_t *dst = pipe_texture_map_3d(pctx, info->dst.resource, info->dst.level, PIPE_MAP_WRITE,
++                                      db->x, db->y, db->z, db->width, db->height, db->depth, &dt_);
++   if (!dst) {
++      pipe_texture_unmap(pctx, st_);
++      return false;
++   }
++   unsigned scpp = util_format_get_blocksize(info->src.format);
++   unsigned dcpp = util_format_get_blocksize(info->dst.format);
++   float *row = malloc(sizeof(float) * 4 * sb->width), *out = malloc(sizeof(float) * 4 * db->width);
++   for (int z = 0; z < db->depth; z++) {
++      int sz = z * sb->depth / db->depth;
++      for (int y = 0; y < db->height; y++) {
++         int sy = y * sb->height / db->height;
++         util_format_unpack_rgba(info->src.format, row,
++                                 src + sz * st_->layer_stride + sy * st_->stride, sb->width);
++         for (int x = 0; x < db->width; x++)
++            memcpy(&out[x * 4], &row[(x * sb->width / db->width) * 4], sizeof(float) * 4);
++         util_format_pack_rgba(info->dst.format, dst + z * dt_->layer_stride + y * dt_->stride,
++                               out, db->width);
++      }
++   }
++   (void)scpp; (void)dcpp;
++   free(row);
++   free(out);
++   pipe_texture_unmap(pctx, dt_);
++   pipe_texture_unmap(pctx, st_);
++   return true;
++}
++
+ /* Xenos: no stencil export and no integer sampling, so u_blitter's per-bit
+  * stencil fallback can't read the source; copy the stencil bytes on the CPU
+  * instead (the transfers convert to and from Mesa's Z24S8). Nearest
+@@ -540,6 +591,11 @@ fd_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
+    if (info.render_condition_enable && !fd_render_condition_check(pctx))
+       return true;
+ 
++   if (is_xenos(ctx->screen) &&
++       (info.dst.resource->target == PIPE_TEXTURE_3D || info.src.resource->target == PIPE_TEXTURE_3D) &&
++       xenos_blit_3d_cpu(ctx, &info))
++      return true;
++
+    if (ctx->blit && ctx->blit(ctx, &info))
+       return true;
+ 
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index 9c9ad27..134c104 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -718,6 +718,19 @@ bool xenos_depth_path(void);
+ static void xenos_tile_copy(struct fd_resource *rsc, unsigned level, const struct pipe_box *box,
+                             uint8_t *linear, unsigned stride, bool to_linear);
+ 
++/* (de)tile every layer of a box (2D array layers, cube faces) */
++static void
++xenos_tile_copy_layers(struct fd_resource *rsc, unsigned level, const struct pipe_box *box,
++                       uint8_t *linear, unsigned stride, bool to_linear)
++{
++   for (int z = 0; z < MAX2(box->depth, 1); z++) {
++      struct pipe_box b = *box;
++      b.z = box->z + z;
++      b.depth = 1;
++      xenos_tile_copy(rsc, level, &b, linear + (size_t)z * stride * box->height, stride, to_linear);
++   }
++}
++
+ static void
+ fd_resource_transfer_unmap(struct pipe_context *pctx,
+                            struct pipe_transfer *ptrans)
+@@ -732,7 +745,7 @@ fd_resource_transfer_unmap(struct pipe_context *pctx,
+ 
+    if (trans->xenos_linear) {
+       if (ptrans->usage & PIPE_MAP_WRITE)
+-         xenos_tile_copy(rsc, ptrans->level, &ptrans->box, trans->xenos_linear, ptrans->stride, false);
++         xenos_tile_copy_layers(rsc, ptrans->level, &ptrans->box, trans->xenos_linear, ptrans->stride, false);
+       free(trans->xenos_linear);
+       trans->xenos_linear = NULL;
+    }
+@@ -878,7 +891,7 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+       fprintf(stderr, "xenos map %p %s %ux%u+%u,%u level %u usage %x cpp %u pitch %u\n", (void *)rsc,
+               util_format_short_name(prsc->format), box->width, box->height, box->x, box->y, level, usage,
+               rsc->layout.cpp, fd_resource_pitch(rsc, level));
+-   trans->xenos_linear = malloc((size_t)stride * box->height);
++   trans->xenos_linear = malloc((size_t)stride * box->height * MAX2(box->depth, 1));
+    if (!trans->xenos_linear)
+       return NULL;
+    trans->b.b.stride = stride;
+@@ -886,7 +899,7 @@ resource_transfer_map_xenos(struct pipe_context *pctx, struct pipe_resource *prs
+    if (usage & PIPE_MAP_READ)
+       xenos_inval_cached(rsc, level);
+    if (usage & PIPE_MAP_READ)
+-      xenos_tile_copy(rsc, level, box, trans->xenos_linear, stride, true);
++      xenos_tile_copy_layers(rsc, level, box, trans->xenos_linear, stride, true);
+    if (usage & PIPE_MAP_WRITE)
+       rsc->valid = true;
+    return trans->xenos_linear;
+@@ -1004,7 +1017,7 @@ resource_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+     * splitting a batch.. for ex, mid-frame texture uploads to a tiled
+     * texture.
+     */
+-   if (rsc->layout.tile_mode && is_xenos(ctx->screen) && box->depth == 1) {
++   if (rsc->layout.tile_mode && is_xenos(ctx->screen)) {
+       return resource_transfer_map_xenos(pctx, prsc, level, usage, box, trans);
+    } else if (rsc->layout.tile_mode) {
+       return resource_transfer_map_staging(pctx, prsc, level, usage, box, trans);
+@@ -1179,7 +1192,7 @@ fd_resource_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+     * when the map is unsynchronized (a fresh texture: improve_transfer_map_usage
+     * adds UNSYNCHRONIZED, and the data went in linear; st's glDrawPixels
+     * textures came out in 4-texel blocks) */
+-   if (rsc->layout.tile_mode && is_xenos(ctx->screen) && box->depth == 1 &&
++   if (rsc->layout.tile_mode && is_xenos(ctx->screen) &&
+        !(usage & TC_TRANSFER_MAP_THREADED_UNSYNC)) {
+       ret = resource_transfer_map_xenos(pctx, prsc, level, usage, box, trans);
+    } else if (usage & PIPE_MAP_UNSYNCHRONIZED) {
+-- 
+2.53.0
+
