@@ -1,0 +1,72 @@
+From c1bd70bde73cafe0df3131688e5554c0feaf9d20 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 14:24:31 -0700
+Subject: [PATCH] freedreno/a2xx: skip unchanged filter rounding constants
+ within a batch
+
+Rewriting the 64-dword constant block for the bilinear rounding offsets on
+every draw cost 2-3% in small glamor operations (x11perf putimage10,
+copywinwin10). Skip it when the shadow already holds the values and an
+earlier draw of the same batch wrote them; the gmem programs zero them per
+tile, so a new batch always writes them again.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_context.h |  5 +++++
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c    | 15 +++++++++++++--
+ 2 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_context.h b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+index 90dd41a..6916c53 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_context.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+@@ -25,6 +25,11 @@ struct fd2_context {
+     * writes in whole 16-constant blocks (a 3-constant write hangs it), so every
+     * update rewrites its blocks from this copy. */
+    uint32_t xenos_alu[2048];
++
++   /* batch whose draw ring already holds the current filter rounding
++    * constants (fd2_emit.c; the gmem programs zero them per tile) */
++   unsigned texround_seqno;
++   bool texround_valid;
+ };
+ 
+ static inline struct fd2_context *
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index ad44112..a62036e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -529,6 +529,9 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+    if ((dirty & (FD_DIRTY_TEX | FD_DIRTY_PROG | FD_DIRTY_CONST)) && ctx->prog.fs &&
+        ((struct fd2_shader_stateobj *)ctx->prog.fs)->texround_samplers) {
+       struct fd_texture_stateobj *tex = &ctx->tex[MESA_SHADER_FRAGMENT];
++      struct fd2_context *fd2_ctx = fd2_context(ctx);
++      bool same_batch = fd2_ctx->texround_valid && ctx->batch &&
++                        fd2_ctx->texround_seqno == ctx->batch->seqno;
+       u_foreach_bit (i, ((struct fd2_shader_stateobj *)ctx->prog.fs)->texround_samplers) {
+          struct pipe_sampler_state *samp = i < tex->num_samplers ? tex->samplers[i] : NULL;
+          struct pipe_sampler_view *view = i < tex->num_textures ? tex->textures[i] : NULL;
+@@ -543,8 +546,16 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+             w[1] = rect ? 1.0f / 128 : 1.0f / (128.0f * u_minify(prsc->height0, l));
+             w[2] = 1.0f / (128.0f * u_minify(prsc->depth0, l));
+          }
+-         fd2_emit_alu_consts(ctx, ring, (PS_CONST_BASE + IR2_TEXROUND_CONST + i) * 4,
+-                             (const uint32_t *)w, 4);
++         /* unchanged since an earlier draw of this batch: skip the
++          * 64-dword block write (x11perf copywinwin10 -3%) */
++         uint32_t base = (PS_CONST_BASE + IR2_TEXROUND_CONST + i) * 4;
++         if (same_batch && !memcmp(&fd2_ctx->xenos_alu[base], w, sizeof(w)))
++            continue;
++         fd2_emit_alu_consts(ctx, ring, base, (const uint32_t *)w, 4);
++      }
++      if (ctx->batch) {
++         fd2_ctx->texround_seqno = ctx->batch->seqno;
++         fd2_ctx->texround_valid = true;
+       }
+    }
+ }
+-- 
+2.53.0
+
