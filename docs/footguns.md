@@ -62,3 +62,5 @@ Mesa's `util_format_description` lists the channels of packed formats in memory 
 ## Don't widen the screen scissor past the framebuffer for the depth restore
 
 The depth restore goes through the color path in 40-pixel partner strips. When the framebuffer width isn't a multiple of 80, some visible depth pixels sit in EDRAM columns past the width, so a restore stopping at the width leaves them stale. Restoring whole 80-pixel tiles with `PA_SC_SCREEN_SCISSOR` widened to match fixed a 64-pixel buffer and wedged the GPU on a 123-pixel one (the fence never completed; power cycle). It is harmless for GPU-only rendering, since EDRAM keeps its contents between batches, but data the CPU wrote into a depth/stencil buffer (stencil `glDrawPixels`) is lost in those columns.
+
+Mesa 0062 fixes the depth half of this: after the strips, a pass whose pixel shader writes the sampled depth with `oDepth` covers just the columns the strips can't reach (the depth path places the pixels itself). Stencil in those columns is still lost, since Xenos has no stencil export.

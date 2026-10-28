@@ -1,0 +1,173 @@
+From 6ce87bd3e04982f61c2866724003fb5ebbc97911 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 17:19:38 -0700
+Subject: [PATCH] freedreno/xenos: restore past-width depth through a depth
+ export pass
+
+The color-path restore of depth (40-pixel partner strips) can't reach the
+depth of pixels whose EDRAM position lies past the framebuffer width, so
+depth the CPU wrote (or that another framebuffer left in EDRAM) stayed
+stale there: in a 123-wide buffer columns 88-119, in a 64-wide one 24-39
+(gltest/glcpudepth.c). After the strips, draw over just those columns with
+a pixel shader that samples the depth (FMT_24_8, like a depth sampler
+view) and writes it with oDepth, color writes off; the depth path puts
+every pixel where it belongs. Only those columns, because the float depth
+can come back one step off (piglit gl-1.4-polygon-offset failed when the
+pass covered everything). The strips still restore stencil.
+XENOS_NO_ZEXPORT_RESTORE=1 turns the pass off.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_gmem.c | 83 +++++++++++++++++++
+ .../drivers/freedreno/a2xx/fd2_program.c      |  2 +-
+ .../drivers/freedreno/freedreno_program.c     | 10 ++-
+ 3 files changed, 93 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+index fb33d9c..7f9fc04 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_gmem.c
+@@ -408,6 +408,72 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
+            DI_SRC_SEL_AUTO_INDEX, 3, 0, INDEX_SIZE_IGN, 0, 0, NULL);
+ }
+ 
++DEBUG_GET_ONCE_BOOL_OPTION(xenos_no_zexport_restore, "XENOS_NO_ZEXPORT_RESTORE", false)
++
++/* Xenos: write depth for the restore from the pixel shader (oDepth). This
++ * goes through the depth path, so every pixel lands where the hardware keeps
++ * it; the color-path strips can't reach the depth of pixels whose EDRAM
++ * position lies past the framebuffer width. Stencil isn't restored by this
++ * (no stencil export), the strips before it write it. */
++static void
++xenos_restore_depth_export(struct fd_batch *batch, struct pipe_surface *psurf) assert_dt
++{
++   struct fd_context *ctx = batch->ctx;
++   struct fd_ringbuffer *ring = batch->gmem;
++   struct fd_resource *rsc = fd_resource(psurf->texture);
++   uint32_t offset = fd_resource_offset(rsc, psurf->level, psurf->first_layer);
++   struct surface_format fmt = fd2_pipe2surface(psurf->format);
++
++   if (!ctx->blit_z.fs)
++      return;
++
++   fd2_program_emit(ctx, ring, &ctx->blit_z);
++
++   fd2_xenos_align(ring, 2);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 7);
++   OUT_RING(ring, 0x00010000);
++   OUT_RING(ring, A2XX_SQ_TEX_0_TYPE(SQ_TEX_TYPE_VALID_TEXTURE) |
++                     A2XX_SQ_TEX_0_CLAMP_X(SQ_TEX_CLAMP_LAST_TEXEL) |
++                     A2XX_SQ_TEX_0_CLAMP_Y(SQ_TEX_CLAMP_LAST_TEXEL) |
++                     A2XX_SQ_TEX_0_CLAMP_Z(SQ_TEX_CLAMP_LAST_TEXEL) |
++                     A2XX_SQ_TEX_0_PITCH(fdl2_pitch_pixels(&rsc->layout, psurf->level)) |
++                     COND(rsc->layout.tile_mode, A2XX_SQ_TEX_0_TILED));
++   OUT_RELOC(ring, rsc->bo, offset,
++             A2XX_SQ_TEX_1_FORMAT(fmt.format) | A2XX_SQ_TEX_1_CLAMP_POLICY(SQ_TEX_CLAMP_POLICY_OGL), 0);
++   OUT_RING(ring, A2XX_SQ_TEX_2_WIDTH(pipe_surface_width(psurf) - 1) |
++                     A2XX_SQ_TEX_2_HEIGHT(pipe_surface_height(psurf) - 1));
++   /* depth into every channel, as a depth sampler view does */
++   OUT_RING(ring, A2XX_SQ_TEX_3_MIP_FILTER(SQ_TEX_FILTER_BASEMAP) |
++                     A2XX_SQ_TEX_3_NUM_FORMAT(fmt.num_format) |
++                     fd2_tex_swiz(psurf->format, PIPE_SWIZZLE_X, PIPE_SWIZZLE_X,
++                                  PIPE_SWIZZLE_X, PIPE_SWIZZLE_X) |
++                     A2XX_SQ_TEX_3_XY_MAG_FILTER(SQ_TEX_FILTER_POINT) |
++                     A2XX_SQ_TEX_3_XY_MIN_FILTER(SQ_TEX_FILTER_POINT));
++   OUT_RING(ring, 0x00000000);
++   OUT_RING(ring, A2XX_SQ_TEX_5_DIMENSION(SQ_TEX_DIMENSION_2D));
++
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_MASK));
++   OUT_RING(ring, 0);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTHCONTROL));
++   OUT_RING(ring, A2XX_RB_DEPTHCONTROL_Z_ENABLE | A2XX_RB_DEPTHCONTROL_Z_WRITE_ENABLE |
++                     A2XX_RB_DEPTHCONTROL_ZFUNC(FUNC_ALWAYS));
++
++   fd_draw(batch, ring, DI_PT_RECTLIST, IGNORE_VISIBILITY,
++           DI_SRC_SEL_AUTO_INDEX, 3, 0, INDEX_SIZE_IGN, 0, 0, NULL);
++
++   /* back to the plain blit for the color restore */
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_DEPTHCONTROL));
++   OUT_RING(ring, A2XX_RB_DEPTHCONTROL_EARLY_Z_ENABLE);
++   OUT_PKT3(ring, CP_SET_CONSTANT, 2);
++   OUT_RING(ring, CP_REG(REG_A2XX_RB_COLOR_MASK));
++   OUT_RING(ring, A2XX_RB_COLOR_MASK_WRITE_RED | A2XX_RB_COLOR_MASK_WRITE_GREEN |
++                     A2XX_RB_COLOR_MASK_WRITE_BLUE | A2XX_RB_COLOR_MASK_WRITE_ALPHA);
++   fd2_program_emit(ctx, ring, &ctx->blit_prog[0]);
++}
++
+ static void
+ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+                        const struct fd_tile *tile) assert_dt
+@@ -585,6 +651,23 @@ fd2_emit_tile_mem2gmem(struct fd_batch *batch,
+          OUT_RING(ring, fui(sx + (float)bin_w / 2.0f));
+          OUT_RING(ring, fui(-(float)bin_h / 2.0f));
+          OUT_RING(ring, fui(sy + (float)bin_h / 2.0f));
++         /* depth pixels in [x_end - 40, T + 40) of the last 80-pixel tile T
++          * sit in EDRAM past x_end, out of the strips' reach: write those
++          * with the depth export pass (only those: its float depth can be
++          * one step off, gl-1.4-polygon-offset noticed) */
++         unsigned t0 = (pfb->width - 1) / 80 * 80;
++         unsigned m0 = MAX2(t0, x_end >= 40 ? x_end - 40 : 0), m1 = MIN2(t0 + 40, pfb->width);
++         if (m0 < m1 && !debug_get_option_xenos_no_zexport_restore()) {
++            OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++            OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
++            OUT_RING(ring, A2XX_PA_SC_WINDOW_OFFSET_DISABLE | xy2d(MAX2(m0, sx), sy));
++            OUT_RING(ring, xy2d(MIN2(m1, sx + bin_w), sy + bin_h));
++            xenos_restore_depth_export(batch, &pfb->zsbuf);
++            OUT_PKT3(ring, CP_SET_CONSTANT, 3);
++            OUT_RING(ring, CP_REG(REG_A2XX_PA_SC_WINDOW_SCISSOR_TL));
++            OUT_RING(ring, A2XX_PA_SC_WINDOW_OFFSET_DISABLE | xy2d(sx, sy));
++            OUT_RING(ring, xy2d(sx + bin_w, sy + bin_h));
++         }
+       } else {
+          emit_mem2gmem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf);
+       }
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 2e317c0..9d05f13 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -289,7 +289,7 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+    f = &fp->variant[0].f;
+ 
+    /* clear/gmem2mem/mem2gmem need to be changed to remove this condition */
+-   if (prog != &ctx->solid_prog && prog != &ctx->blit_prog[0]) {
++   if (prog != &ctx->solid_prog && prog != &ctx->blit_prog[0] && prog != &ctx->blit_z) {
+       patch_fetches(ctx, vpi, ctx->vtx.vtx, &ctx->tex[MESA_SHADER_VERTEX]);
+       if (fp)
+          patch_fetches(ctx, fpi, NULL, &ctx->tex[MESA_SHADER_FRAGMENT]);
+diff --git a/src/gallium/drivers/freedreno/freedreno_program.c b/src/gallium/drivers/freedreno/freedreno_program.c
+index e8f6fcf..45e442a 100644
+--- a/src/gallium/drivers/freedreno/freedreno_program.c
++++ b/src/gallium/drivers/freedreno/freedreno_program.c
+@@ -306,8 +306,14 @@ fd_prog_init(struct pipe_context *pctx)
+    ctx->blit_prog[0].vs = fd_prog_blit_vs(pctx);
+    ctx->blit_prog[0].fs = fd_prog_blit_fs(pctx, 1, false);
+ 
+-   if (ctx->screen->gen < 3)
++   if (ctx->screen->gen < 3) {
++      /* Xenos: the depth restore writes depth from the shader (fd2_gmem.c) */
++      if (is_xenos(ctx->screen)) {
++         ctx->blit_z.vs = ctx->blit_prog[0].vs;
++         ctx->blit_z.fs = fd_prog_blit_fs(pctx, 0, true);
++      }
+       return;
++   }
+ 
+    for (i = 1; i < ctx->screen->max_rts; i++) {
+       ctx->blit_prog[i].vs = ctx->blit_prog[0].vs;
+@@ -342,6 +348,8 @@ fd_prog_fini(struct pipe_context *pctx)
+ 
+    pctx->delete_vs_state(pctx, ctx->blit_prog[0].vs);
+    pctx->delete_fs_state(pctx, ctx->blit_prog[0].fs);
++   if (ctx->screen->gen < 3 && ctx->blit_z.fs)
++      pctx->delete_fs_state(pctx, ctx->blit_z.fs);
+ 
+    if (ctx->screen->gen < 3)
+       return;
+-- 
+2.53.0
+
