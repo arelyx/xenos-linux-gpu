@@ -1,0 +1,41 @@
+From 9b008f421158442d3fba89b0bb04707782e36011 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 19:30:41 -0700
+Subject: [PATCH] freedreno/xenos: 132 vertex uniform vectors
+
+Mesa keeps one vector for itself, so 128 left GL_MAX_VERTEX_UNIFORM_COMPONENTS
+at 508, under GL 2.0's 512 / GLES2's 128 vectors (piglit built-in-constants,
+dEQP implementation_limits.max_vertex_uniform_vectors and
+state_query.integers.max_vertex_uniform_vectors_getfloat now pass). 132 plus
+64 immediates still ends below the viewport constants at C254.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_screen.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index a7fef5a..d658af1 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -268,11 +268,12 @@ fd_init_shader_caps(struct fd_screen *screen)
+          (is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen) ? 4096 : 64) * sizeof(float[4]);
+       /* Xenos: each stage has 256 constant registers (pixel shader from
+        * 0x120, of which IR2_SHADOW_CONST.. are the driver's); uniforms plus
+-       * up to 64 immediates must fit. GL 2.0 wants 128 vertex uniform
+-       * vectors (and ARB_vertex_program 96 parameters: piglit vp-max-array) */
++       * up to 64 immediates must fit. GL 2.0 wants 128 vertex uniform vectors
++       * left after Mesa takes one for itself (piglit built-in-constants), and
++       * ARB_vertex_program 96 parameters (piglit vp-max-array) */
+       if (is_xenos(screen))
+          caps->max_const_buffer0_size =
+-            (i == MESA_SHADER_VERTEX ? 128 : 112) * sizeof(float[4]);
++            (i == MESA_SHADER_VERTEX ? 132 : 112) * sizeof(float[4]);
+ 
+       caps->max_const_buffers = is_ir3(screen) ? 16 : 1;
+ 
+-- 
+2.53.0
+
