@@ -52,7 +52,7 @@ Things that cost us hours. Most are obvious in hindsight.
 - **Replay passing doesn't clear a stream.** It clears the stream in replay's state. Twice the real cause was state from earlier work (see methodology).
 - **freedreno's rd dump names files by fence number**, and without "full" it omits buffer contents, so replays fail on missing addresses.
 - **Apt build-dep on the console runs it out of memory** (458 MB). Build in a chroot of the NFS root on the host with qemu-user binfmt.
-- **A desktop session or leftover Xorg runs dEQP out of GPU memory.** GL buffers come from a 48 MB pool, and an Xorg holds its share. Big texture cases then fail with `GL_OUT_OF_MEMORY`. It bit twice: an Xorg left over from a benchmark, then the Xfce session restarted by `perfcheck.sh`. `xperf.sh` stops its Xorg when it finishes, and `gl-ready.sh` stops the session and any Xorg before GL tests.
+- **A desktop session or leftover Xorg runs dEQP out of GPU memory.** GL buffers come from an 80 MB pool (48 MB before 2026-10-28), and an Xorg holds its share. Big texture cases then fail with `GL_OUT_OF_MEMORY`. It bit twice: an Xorg left over from a benchmark, then the Xfce session restarted by `perfcheck.sh`. `xperf.sh` stops its Xorg when it finishes, and `gl-ready.sh` stops the session and any Xorg before GL tests.
 - **The Xbox has 458 MB.** dEQP's ETC1 tests run it out of memory and the console stops answering. They're skipped.
 
 ## Format descriptions are endian-specific

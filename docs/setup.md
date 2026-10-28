@@ -58,7 +58,8 @@ make -C <kernel tree> ARCH=powerpc CROSS_COMPILE=xenon- M=$PWD/kernel/xegpu modu
 | `msm_compat` | 0 | expose the msm DRM interface Mesa needs |
 | `gpu_blit` | 1 after bring-up | GPU linear-to-tiled blit for CPU framebuffers |
 | `direct_scanout` | 1 | scan out GL (tiled) framebuffers in place |
-| `msm_pool` | 1 | GL buffers from the boot-time contiguous pool (48 MB) |
+| `msm_pool` | 1 | GL buffers from the boot-time contiguous pool (`pool_mb`) |
+| `pool_mb` | 48 (80 set in `config/modprobe/xegpu.conf`, installed as `/etc/modprobe.d/xegpu.conf`) | MB of GPU pool reserved at load, in 16 MB blocks; adjacent blocks become one range. At boot five blocks come out adjacent (`pool range 14000000 + 81920 KB (5 chunks)`); it costs that much system RAM (about 138 MB left with the desktop up, 190 MB with 48) |
 | `msm_min_free_mb` | 48 | refuse GL buffers from outside the pool when less system RAM than this is available. A GL client that allocated command buffers without end (a driver bug) used to take all RAM and freeze the console in the OOM killer's thrashing; now its allocation fails and only the client dies |
 | `pool_free_kb` | read-only | free and total pool memory, `free of total` in KB (idle IceWM desktop: 37568 of 49152; no leak after a 2,145-case dEQP sample and a piglit run) |
 | `msm_zero_bo` | 0 | clear pool buffers when they are allocated. The pool is recycled between processes, so without it one process can read what another left behind (piglit `security/initialized-*` warn). Costs about 12% in x11perf `-putimage500`. |

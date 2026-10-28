@@ -58,7 +58,7 @@ What still failed in full9 (50 cases; the first row is fixed in full10):
 | 14 | `fbo.render.recreate_colorbuffer.*` | fixed in full10: color-only clears kept the depth test |
 | 8 | `shaders.indexing.tmp_array.*` (Crash) | ir2 can't compile dynamically indexed temporary arrays; it aborts instead of hanging the GPU |
 | 6 | `texture.mipmap.2d.projected.*` | projected mipmap level selection |
-| 6 | `texture.size` 2048x2048 mipmapped, 512 cube (ResourceError) | out of GPU pool memory (48 MB) |
+| 0 | `texture.size` 2048x2048 mipmapped, 512 cube (ResourceError until 2026-10-28) | fixed: one pool range, 80 MB, Mesa 0071 and 0073 |
 | 5 | `clipping` wide points and lines | |
 | 3 | `uniform_api.random.*` | |
 | 3 | `state_query` read type, max vertex uniform vectors (getfloat) | we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32; ES2 doesn't list it |
@@ -117,3 +117,5 @@ Nineteenth pass (gl20-19, Mesa 0069 and 0070: depth clears through an exported d
 Twentieth pass (xegpu merges physically adjacent pool blocks into one range, hardware rule 36; Mesa 0071 purges the BO cache and retries at the exact size when the kernel refuses a buffer): dEQP full31 **17,048 of 17,075, 99.8%**, four more passes than full30 (the 2048x2048 textures), no regressions; ResourceError went from 6 to 2. The two left, `texture.size.2d.2048x2048_rgb888_mipmap` and `_rgba8888_mipmap` (21 MB each), pass alone but not right after the 16 MB case before them: 18 MB of the pool is still held and the free 30 MB is split. piglit gl20-21: 1,030 pass, identical to gl20-19 (`tex3d-maxsize` needed 0071: it allocates, deletes and reallocates its largest texture).
 
 Mesa 0072 (performance: skip unchanged filter rounding constants within a batch): dEQP full32 identical to full31; piglit gl20-22 1,029, the one difference `tex3d-maxsize`, which fails right after a full run and passes 4 of 4 on its own. Its largest textures exceed what is free in the pool, and the system-RAM fallback for them needs free 16 MB blocks, which a long run fragments.
+
+GPU pool 48 -> 80 MB (`pool_mb=80`, five adjacent 16 MB blocks at boot) and Mesa 0073 (glDeleteTextures drops the units' `_Current` references and the driver's bound sampler views, so a deleted texture's memory is free for the next allocation, not only after the next draw): dEQP full33 **17,050 of 17,075, 99.9%**, no ResourceErrors left (the two `texture.size.2d.2048x2048` mipmap cases pass), no regressions. piglit gl20-23: 1,030 pass (`tex3d-maxsize` passes). perfcheck within noise of the baseline (putimage500 x0.93, its usual 160-180 spread).

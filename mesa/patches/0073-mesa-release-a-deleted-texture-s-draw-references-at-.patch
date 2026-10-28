@@ -1,0 +1,94 @@
+From 412a7c3440ab863744ee0440a67d7a5206bfc653 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 15:15:42 -0700
+Subject: [PATCH] mesa: release a deleted texture's draw references at
+ glDeleteTextures
+
+A texture used by the last draw stayed referenced by the texture units'
+_Current and by the driver's bound sampler views until the next draw
+revalidated them, keeping its memory. Drop both at deletion (both are
+rebuilt from _NEW_TEXTURE_OBJECT). Xenos has a fixed 80 MB GPU pool:
+piglit tex3d-maxsize reallocates its largest 3D texture right after
+deleting a 32 MB one.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/mesa/main/texobj.c                   | 16 ++++++++++++++++
+ src/mesa/state_tracker/st_sampler_view.c | 17 +++++++++++++++++
+ src/mesa/state_tracker/st_sampler_view.h |  3 +++
+ 3 files changed, 36 insertions(+)
+
+diff --git a/src/mesa/main/texobj.c b/src/mesa/main/texobj.c
+index 97b29ec..7a0c3d5 100644
+--- a/src/mesa/main/texobj.c
++++ b/src/mesa/main/texobj.c
+@@ -1523,6 +1523,22 @@ delete_textures(struct gl_context *ctx, GLsizei n, const GLuint *textures)
+ 
+             st_texture_release_all_sampler_views(st_context(ctx), delObj);
+ 
++            /* A texture used by the last draw stays referenced by the
++             * units' _Current and by the driver's bound sampler views until
++             * the next draw revalidates them, keeping its memory alive. Drop
++             * both now (both are rebuilt from _NEW_TEXTURE_OBJECT): a GPU
++             * with a small fixed pool (Xenos, 80 MB) can then reuse it for
++             * the next allocation (piglit tex3d-maxsize). */
++            bool was_current = false;
++            for (GLuint u = 0; u < ctx->Texture.NumCurrentTexUsed; u++) {
++               if (ctx->Texture.Unit[u]._Current == delObj) {
++                  _mesa_reference_texobj(&ctx->Texture.Unit[u]._Current, NULL);
++                  was_current = true;
++               }
++            }
++            if (was_current)
++               st_unbind_sampler_views(st_context(ctx));
++
+             /* Unreference the texobj.  If refcount hits zero, the texture
+              * will be deleted.
+              */
+diff --git a/src/mesa/state_tracker/st_sampler_view.c b/src/mesa/state_tracker/st_sampler_view.c
+index feec610..2770f43 100644
+--- a/src/mesa/state_tracker/st_sampler_view.c
++++ b/src/mesa/state_tracker/st_sampler_view.c
+@@ -227,6 +227,23 @@ st_texture_release_context_sampler_view(struct st_context *st,
+  * of the context.  This is called fairly frequently.  For example, whenever
+  * the texture's base level, max level or swizzle change.
+  */
++/* Unbind the sampler views of every stage from the pipe context; the next
++ * draw binds them again (texobj.c delete_textures). */
++void
++st_unbind_sampler_views(struct st_context *st)
++{
++   struct pipe_context *pipe = st->pipe;
++
++   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++      if (!st->state.num_sampler_views[stage])
++         continue;
++      pipe->set_sampler_views(pipe, stage, 0, 0,
++                              st->state.num_sampler_views[stage], NULL);
++      st->state.num_sampler_views[stage] = 0;
++   }
++   ST_SET_SHADER_STATES(st->ctx->NewDriverState, SAMPLER_VIEWS);
++}
++
+ void
+ st_texture_release_all_sampler_views(struct st_context *st,
+                                      struct gl_texture_object *stObj)
+diff --git a/src/mesa/state_tracker/st_sampler_view.h b/src/mesa/state_tracker/st_sampler_view.h
+index 55eb47c..d221d88 100644
+--- a/src/mesa/state_tracker/st_sampler_view.h
++++ b/src/mesa/state_tracker/st_sampler_view.h
+@@ -59,6 +59,9 @@ st_texture_release_context_sampler_view(struct st_context *st,
+                                         struct gl_texture_object *stObj);
+ 
+ extern void
++st_unbind_sampler_views(struct st_context *st);
++
++void
+ st_texture_release_all_sampler_views(struct st_context *st,
+                                      struct gl_texture_object *stObj);
+ 
+-- 
+2.53.0
+

@@ -182,7 +182,7 @@ An exported fragment depth (export 61) is stored as round(d * (2^n - 1)), as GL 
 
 ### 36. The GPU pool is three 16 MB blocks, adjacent in practice
 
-With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB pool as three `dma_alloc_coherent` blocks. `gen_pool` never places one buffer across two chunks, so a 2048x2048 RGBA texture (16 MB, 21 MB with mipmaps) could not be allocated even with the pool empty. The blocks came out physically adjacent (`0x13000000`..`0x16000000`); the module sorts them, maps each adjacent run once more with `vmap` and the coherent attributes, and adds it to the pool as one range (`dmesg`: `pool range 13000000 + 49152 KB (3 chunks)`).
+With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB pool as three `dma_alloc_coherent` blocks. `gen_pool` never places one buffer across two chunks, so a 2048x2048 RGBA texture (16 MB, 21 MB with mipmaps) could not be allocated even with the pool empty. The blocks came out physically adjacent (`0x13000000`..`0x16000000`); the module sorts them, maps each adjacent run once more with `vmap` and the coherent attributes, and adds it to the pool as one range (`dmesg`: `pool range 13000000 + 49152 KB (3 chunks)`). With `pool_mb=80` at boot, five blocks come out adjacent as well.
 
 ## Formats
 
