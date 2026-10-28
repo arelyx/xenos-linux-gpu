@@ -172,6 +172,10 @@ Xenos has six user clip planes like R300: enable bits 0-5 of `PA_CL_CLIP_CNTL`, 
 
 The pixel shader's generated parameter (`SQ_CONTEXT_MISC.PARAM_GEN_POS`) holds the sprite coordinate in zw only when the vertex shader exports the point size and `VS_EXPORT_MODE` is `POSITION_2_VECTORS_SPRITE`; with the size from `PA_SU_POINT_SIZE` alone zw stay 0. The sign bits of the parameter flag the primitive type (Xenia's notes), so take `abs()`, and w grows towards GL's +y in a framebuffer object (bottom of the point is 0). Measured with `gltest/glpointcoord.c`.
 
+### 34. Bilinear weights are 6-bit and truncated
+
+The texture unit computes the weight as floor(frac * 64) / 64, with no coordinate offset (`gltest/gllerp.c`). A coordinate at a texel center plus a tiny rounding error takes in 1/64 of the neighbor, up to 4/255 off for 8-bit colors; piglit's tolerance is 3/256. Adding half a step, 1/128 texel, to the coordinate makes it round instead (Mesa 0068: a per-sampler constant, zero for nearest filtering). The tfetch instruction's own offset fields are in half-texel units, too coarse for this.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

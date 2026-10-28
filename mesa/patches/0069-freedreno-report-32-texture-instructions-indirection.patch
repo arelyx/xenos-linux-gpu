@@ -1,0 +1,35 @@
+From 730d506be57359f4f80dc13ff909057a13713110 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 11:04:00 -0700
+Subject: [PATCH 69/69] freedreno: report 32 texture instructions/indirections
+ on Xenos
+
+ir2 records at most 64 fetches per shader; ARB_fragment_program reported
+16384, and fp-indirections2 built a 64+ fetch chain that overran
+fetch_info[] (free(): invalid pointer). fp-indirections and
+fp-indirections2 pass.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/freedreno_screen.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index d658af1..11cf497 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -245,6 +245,9 @@ fd_init_shader_caps(struct fd_screen *screen)
+       caps->max_alu_instructions =
+       caps->max_tex_instructions =
+       caps->max_tex_indirections = 16384;
++      /* Xenos: ir2 records at most 64 fetches per shader (fetch_info[]) */
++      if (is_xenos(screen))
++         caps->max_tex_instructions = caps->max_tex_indirections = 32;
+ 
+       caps->max_control_flow_depth = 8; /* XXX */
+ 
+-- 
+2.53.0
+

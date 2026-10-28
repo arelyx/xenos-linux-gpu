@@ -44,6 +44,8 @@ def load_tests(path, flt):
         flags = ["-auto", "-fbo"] if opts.get("run_concurrent") != "False" else ["-auto"]
         if t.get("type") in ("gl", "shader"):
             cmd = cmd + flags
+        if t.get("type") == "gl_builtin":   # piglit BuiltInConstantsTest
+            cmd[1] = "tests/" + cmd[1]
         tests.append((name, cmd))
     return tests
 

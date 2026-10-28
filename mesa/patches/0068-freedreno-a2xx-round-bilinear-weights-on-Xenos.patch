@@ -1,0 +1,172 @@
+From 56d31673401e30be7efdddcff2fc48a55a8cce2e Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 11:04:00 -0700
+Subject: [PATCH 68/69] freedreno/a2xx: round bilinear weights on Xenos
+
+Xenos truncates bilinear weights to 1/64 (measured: floor(frac * 64) / 64,
+no coordinate offset), up to 4/255 too dark for 8-bit colors. Fragment
+shaders add half a step, 1/128 texel of the base level from a per-sampler
+constant (212 + sampler, zero for nearest filtering and for the gmem
+programs), to 1D/2D/3D/rect coordinates so the truncation rounds.
+piglit 1-1-linear-texture and fbo-blit-stretch pass.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 24 +++++++++++++++
+ .../drivers/freedreno/a2xx/fd2_program.c      | 18 ++++++++---
+ .../drivers/freedreno/a2xx/fd2_program.h      |  1 +
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  4 +++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 30 +++++++++++++++++++
+ 5 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index e38565d..ad44112 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -523,6 +523,30 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+                              (const uint32_t *)w, 4);
+       }
+    }
++
++   /* filter weight rounding offsets (ir2_lower_tex_round): half of the
++    * 1/64 weight step, in the sampler's coordinate units at the base level */
++   if ((dirty & (FD_DIRTY_TEX | FD_DIRTY_PROG | FD_DIRTY_CONST)) && ctx->prog.fs &&
++       ((struct fd2_shader_stateobj *)ctx->prog.fs)->texround_samplers) {
++      struct fd_texture_stateobj *tex = &ctx->tex[MESA_SHADER_FRAGMENT];
++      u_foreach_bit (i, ((struct fd2_shader_stateobj *)ctx->prog.fs)->texround_samplers) {
++         struct pipe_sampler_state *samp = i < tex->num_samplers ? tex->samplers[i] : NULL;
++         struct pipe_sampler_view *view = i < tex->num_textures ? tex->textures[i] : NULL;
++         float w[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++         if (samp && view && view->texture &&
++             (samp->mag_img_filter == PIPE_TEX_FILTER_LINEAR ||
++              samp->min_img_filter == PIPE_TEX_FILTER_LINEAR)) {
++            struct pipe_resource *prsc = view->texture;
++            unsigned l = view->u.tex.first_level;
++            bool rect = prsc->target == PIPE_TEXTURE_RECT || samp->unnormalized_coords;
++            w[0] = rect ? 1.0f / 128 : 1.0f / (128.0f * u_minify(prsc->width0, l));
++            w[1] = rect ? 1.0f / 128 : 1.0f / (128.0f * u_minify(prsc->height0, l));
++            w[2] = 1.0f / (128.0f * u_minify(prsc->depth0, l));
++         }
++         fd2_emit_alu_consts(ctx, ring, (PS_CONST_BASE + IR2_TEXROUND_CONST + i) * 4,
++                             (const uint32_t *)w, 4);
++      }
++   }
+ }
+ 
+ /* emit per-context initialization:
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 9d05f13..7abb329 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -129,10 +129,13 @@ fd2_shader_state_create(struct pipe_context *pctx,
+       nir_foreach_block (block, impl) {
+          nir_foreach_instr (instr, block) {
+             if (instr->type == nir_instr_type_intrinsic &&
+-                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_uniform &&
+-                nir_intrinsic_base(nir_instr_as_intrinsic(instr)) >= IR2_SHADOW_CONST)
+-               so->shadow_samplers |=
+-                  BITFIELD_BIT(nir_intrinsic_base(nir_instr_as_intrinsic(instr)) - IR2_SHADOW_CONST);
++                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_uniform) {
++               unsigned base = nir_intrinsic_base(nir_instr_as_intrinsic(instr));
++               if (base >= IR2_TEXROUND_CONST && base < IR2_TEXROUND_CONST + 12)
++                  so->texround_samplers |= BITFIELD_BIT(base - IR2_TEXROUND_CONST);
++               else if (base >= IR2_SHADOW_CONST && base < IR2_SHADOW_CONST + 12)
++                  so->shadow_samplers |= BITFIELD_BIT(base - IR2_SHADOW_CONST);
++            }
+             if (instr->type != nir_instr_type_tex)
+                continue;
+ 
+@@ -300,6 +303,13 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+ 
+    if (fp) {
+       emit(ring, MESA_SHADER_FRAGMENT, fpi, NULL);
++      /* the gmem restore/blit programs come from create_fs_state as well:
++       * no rounding offsets for them (fd2_emit sets them for draws only) */
++      if (fp->texround_samplers &&
++          (prog == &ctx->solid_prog || prog == &ctx->blit_prog[0] || prog == &ctx->blit_z)) {
++         static const uint32_t zero[12 * 4];
++         fd2_emit_alu_consts(ctx, ring, (0x120 + IR2_TEXROUND_CONST) * 4, zero, ARRAY_SIZE(zero));
++      }
+       fs_gprs = (fpi->max_reg < 0) ? (is_xenos(ctx->screen) ? 0 : 0x80) : fpi->max_reg;
+       vs_export = MAX2(1, f->inputs_count) - 1;
+    }
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index 6903466..037eb14 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -38,6 +38,7 @@ struct fd2_shader_stateobj {
+    bool writes_depth;   /* fragment shader exports depth (oDepth, export 61) */
+    uint16_t tex_lod_samplers;
+    uint16_t shadow_samplers;   /* read IR2_SHADOW_CONST + sampler */
++   uint16_t texround_samplers; /* read IR2_TEXROUND_CONST + sampler */
+ 
+    /* note:
+     * fragment shader only has one variant
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index 250d443..617daac 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -53,6 +53,10 @@ struct ir2_shader_info {
+  * as (less, equal, greater, 0) weights, emitted by fd2_emit.c */
+ #define IR2_SHADOW_CONST 200
+ 
++/* fragment shader constant per sampler holding the coordinate offset that
++ * makes the filter's truncated 6-bit weights round (ir2_lower_tex_round) */
++#define IR2_TEXROUND_CONST 212   /* + 12 samplers: the last of the 224 PS constants */
++
+ struct ir2_frag_linkage {
+    unsigned inputs_count;
+    struct {
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index ee1dbed..b74c6c7 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -141,6 +141,34 @@ ir2_lower_tex_shadow(nir_builder *b, nir_tex_instr *tex, void *data)
+    return true;
+ }
+ 
++/* Xenos truncates bilinear weights to 1/64: a coordinate at a texel center
++ * plus a rounding error picks up 1/64 of the neighbor, 4/255 off for 8-bit
++ * colors (piglit 1-1-linear-texture, fbo-blit-stretch). Adding half a step
++ * (1/128 texel of the base level, from IR2_TEXROUND_CONST + sampler, zero for
++ * nearest filtering) makes the truncation round. */
++static bool
++ir2_lower_tex_round(nir_builder *b, nir_tex_instr *tex, void *data)
++{
++   if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
++        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
++       nir_tex_instr_src_index(tex, nir_tex_src_comparator) >= 0 ||
++       tex->is_array || tex->sampler_index >= 12 ||
++       (tex->sampler_dim != GLSL_SAMPLER_DIM_1D && tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
++        tex->sampler_dim != GLSL_SAMPLER_DIM_3D && tex->sampler_dim != GLSL_SAMPLER_DIM_RECT))
++      return false;
++
++   int c = nir_tex_instr_src_index(tex, nir_tex_src_coord);
++   if (c < 0)
++      return false;
++   b->cursor = nir_before_instr(&tex->instr);
++   nir_def *coord = tex->src[c].src.ssa;
++   nir_def *off = nir_load_uniform(b, 4, 32, nir_imm_int(b, 0),
++                                   .base = IR2_TEXROUND_CONST + tex->sampler_index);
++   off = nir_trim_vector(b, off, coord->num_components);
++   nir_src_rewrite(&tex->src[c].src, nir_fadd(b, coord, off));
++   return true;
++}
++
+ /* Xenos: the sprite coordinate's y grows towards GL's +y; st expects the
+  * upper-left origin (lower_wpos_pntc), so use 1 - y */
+ static bool
+@@ -227,6 +255,8 @@ ir2_optimize_nir(nir_shader *s, bool lower)
+    if (lower) {
+       OPT_V(s, ir3_nir_apply_trig_workarounds);
+       OPT_V(s, nir_lower_tex, &tex_options);
++      if (fd2_xenos && s->info.stage == MESA_SHADER_FRAGMENT)
++         OPT_V(s, nir_shader_tex_pass, ir2_lower_tex_round, nir_metadata_control_flow, NULL);
+       OPT_V(s, nir_shader_tex_pass, ir2_lower_tex_shadow, nir_metadata_control_flow, NULL);
+       OPT_V(s, nir_shader_tex_pass, ir2_lower_txf, nir_metadata_control_flow, NULL);
+       OPT_V(s, nir_shader_intrinsics_pass, ir2_scalarize_derivatives, nir_metadata_control_flow, NULL);
+-- 
+2.53.0
+
