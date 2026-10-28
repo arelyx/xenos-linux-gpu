@@ -103,3 +103,7 @@ Fourteenth pass (gl20-14, Mesa 0061 and the first version of 0062): 1,018 pass, 
 
 Fifteenth pass (gl20-15, Mesa 0062 final, 0063 and 0064: native quads, quad strips and polygons, so line polygon mode draws only their outer edges): 1,020 pass, **89.6%** of executed. The one non-pass that had passed, `tex-miplevel-selection 1dshadow`, was killed by the OOM killer again: a tiled 1D texture takes 32 rows. Mesa 0065 keeps tiling for 1D depth textures only; the 48 1D/miplevel tests match gl20-14. dEQP full26: 99.8%, no regressions apart from a `texture.size.cube` case out of GPU memory.
 
+Sixteenth pass (gl20-16, Mesa 0066: 132 vertex uniform vectors, plus the xegpu `msm_min_free_mb` guard): 1,017 pass. Four `tex-miplevel-selection` bias shadow cases went from pass to segfault. They draw for a long time without a flush; the draw ring grew until 38 MB of RAM was free, the new kernel guard refused the next ring buffer, and Mesa mapped a NULL buffer. dEQP full27: 99.8%, fixed the 2 `max_vertex_uniform_vectors` cases, no regressions.
+
+Seventeenth pass (gl20-17, Mesa 0067: flush a batch once its draw ring holds more than 4 MB): 1,021 pass, **89.6%** of executed. The four bias shadow cases pass again with about 170 MB of RAM free throughout. dEQP full28: identical to full27.
+

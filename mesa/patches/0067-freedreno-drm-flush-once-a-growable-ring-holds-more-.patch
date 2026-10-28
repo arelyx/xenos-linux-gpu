@@ -1,0 +1,41 @@
+From a3dd4b11e52a50d8aad81ee5ded9843bcd377675 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:09:23 -0700
+Subject: [PATCH] freedreno/drm: flush once a growable ring holds more than 4
+ MB
+
+A long run of draws without a flush (piglit tex-miplevel-selection
+bias shadow cases) grew the draw ring until the console had 38 MB
+free; the xegpu low-memory guard then refused the next ring BO and
+fd_ringbuffer_sp_grow mapped NULL. check_size now reports full past
+4 MB so the batch flushes.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/freedreno/drm/freedreno_ringbuffer_sp.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/freedreno/drm/freedreno_ringbuffer_sp.c b/src/freedreno/drm/freedreno_ringbuffer_sp.c
+index 7f50fcc..8bf2fca 100644
+--- a/src/freedreno/drm/freedreno_ringbuffer_sp.c
++++ b/src/freedreno/drm/freedreno_ringbuffer_sp.c
+@@ -714,6 +714,14 @@ fd_ringbuffer_sp_check_size(struct fd_ringbuffer *ring)
+       return false;
+    }
+ 
++   /* Bound the memory one growable ring can hold before a flush, so a
++    * long run of draws without a flush can't take all system RAM:
++    */
++   if ((ring->flags & FD_RINGBUFFER_GROWABLE) &&
++       (fd_ring->u.nr_cmds * ring->size > 4 * 1024 * 1024)) {
++      return false;
++   }
++
+    return true;
+ }
+ 
+-- 
+2.53.0
+
