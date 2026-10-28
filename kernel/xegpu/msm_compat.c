@@ -504,6 +504,15 @@ static int msm_ioctl_gem_new(struct drm_device *dev, void *data, struct drm_file
 	 * uncached ring were a large part of every small batch. */
 	if (obj && !IS_ERR(obj) && msm_cached_rings && (a->flags & MSM_BO_CACHED_COHERENT))
 		obj->map_noncoherent = true;
+	/* the fallback takes system RAM: refuse it before the box runs out (a
+	 * runaway GL client allocating buffers in a loop froze the whole
+	 * console in the OOM killer's thrash instead of failing) */
+	if (!obj && (si_mem_available() << PAGE_SHIFT) < (u64)msm_min_free_mb << 20) {
+		if (msm_debug)
+			pr_info("xegpu: refusing a %u byte buffer, %lu KB available\n", (unsigned)a->size,
+				si_mem_available() << (PAGE_SHIFT - 10));
+		return -ENOMEM;
+	}
 	if (!obj) {
 		xe_creating_msm_bo = true;   /* serialised by the DRM ioctl path for this device file */
 		obj = drm_gem_dma_create(dev, PAGE_ALIGN(a->size));   /* contiguous; caching per msm_cached */

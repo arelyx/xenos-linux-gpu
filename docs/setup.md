@@ -59,6 +59,7 @@ make -C <kernel tree> ARCH=powerpc CROSS_COMPILE=xenon- M=$PWD/kernel/xegpu modu
 | `gpu_blit` | 1 after bring-up | GPU linear-to-tiled blit for CPU framebuffers |
 | `direct_scanout` | 1 | scan out GL (tiled) framebuffers in place |
 | `msm_pool` | 1 | GL buffers from the boot-time contiguous pool (48 MB) |
+| `msm_min_free_mb` | 48 | refuse GL buffers from outside the pool when less system RAM than this is available. A GL client that allocated command buffers without end (a driver bug) used to take all RAM and freeze the console in the OOM killer's thrashing; now its allocation fails and only the client dies |
 | `pool_free_kb` | read-only | free and total pool memory, `free of total` in KB (idle IceWM desktop: 37568 of 49152; no leak after a 2,145-case dEQP sample and a piglit run) |
 | `msm_zero_bo` | 0 | clear pool buffers when they are allocated. The pool is recycled between processes, so without it one process can read what another left behind (piglit `security/initialized-*` warn). Costs about 12% in x11perf `-putimage500`. |
 | `msm_state_init` | 1 | run libxenon's `Xe_Init` stream before the first GL submit after a CP init |
