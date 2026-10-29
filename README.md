@@ -30,7 +30,7 @@ Read these before reusing anything here.
 
 - **This is an AI-driven experiment.** Claude (Opus) did the work in a loop over about three days, with a human setting direction. Treat it as a proof that the hardware can do this, not as reviewed code.
 - **The kernel side is a standalone shim, not the upstream msm driver.** `xegpu.ko` is libxenon's GPU code moved into a kernel module, plus a fake msm UAPI so Mesa's freedreno accepts it. People who know this hardware think upstream `drivers/gpu/drm/msm` (which already handles Adreno 2xx) could drive Xenos with a few patches. That is very likely the better design; we never evaluated it.
-- **Don't use the AltiVec kernel patch** (`kernel/patches/0002-xenon-altivec.patch`). The Xenon's VMX128 unit lacks parts of AltiVec (the integer multiply and sum family, for a start), and Free60 leaves AltiVec off for exactly that reason: software that sees it advertised picks vector code that then dies with SIGILL. Our own notes show it happening: pixman needs `PIXMAN_DISABLE=vmx`, libjpeg-turbo needs `JSIMD_FORCENONE=1`. The patch only existed so that Debian's libLLVM would load; building without libLLVM, or with vector code off, is the right fix.
+- **The first AltiVec kernel patch was wrong, and has been replaced.** It advertised AltiVec to user space, but the Xenon's VMX128 lacks parts of AltiVec (the integer multiply and sum family), and Free60 leaves it off for exactly that reason: software that sees it advertised picks vector code that dies with SIGILL (pixman, libjpeg-turbo; NetSurf died on the first JPEG of a web page). `kernel/patches/0002-xenon-vmx-not-advertised.patch` keeps VMX enabled for code built with AltiVec (Debian's libLLVM) but hides it from `AT_HWCAP` and `/proc/cpuinfo`, so libraries choosing at run time stay on their scalar paths.
 - **Several "hardware rules" are measurements on one console** (a Trinity slim), not documentation. Where a rule says something is impossible, read it as "we didn't find a way".
 
 ## What was new
@@ -58,7 +58,7 @@ We have no working software reset for the Xenos: libxenon never implemented one,
 kernel/xegpu/        xegpu.ko: CP, ring, fences, pool, KMS display (xenos_drm.c), msm UAPI (msm_compat.c)
 kernel/include/      xegpu_uapi.h
 kernel/xenon_idle/   low-priority idle loop for the Xenon SMT threads (1.85x single-thread speed)
-kernel/patches/      Free60 kernel fixes: sis190 TX wake race; AltiVec for Xenon (not recommended, see below)
+kernel/patches/      Free60 kernel fixes: sis190 TX wake race; Xenon VMX enabled but not advertised
 userspace/           libxenon's xe.c/edram.c ported to Linux user space, xeinit (EDRAM training), tests, replay tool
 mesa/patches/        git format-patch series on Mesa (base ab1502f), cross file
 xorg/                glamor big-endian GLES patch (xorg-server 21.1.25), xcopytest (copy/PutImage checker)

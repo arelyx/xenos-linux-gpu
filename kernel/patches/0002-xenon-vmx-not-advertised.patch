@@ -1,0 +1,56 @@
+From: (xbox360 netboot session)
+Subject: [PATCH 2/2] powerpc/xenon: enable VMX for kernel context switching, don't advertise AltiVec
+
+Free60 leaves AltiVec off on Xenon, so any vector instruction traps
+(vector-unavailable, 0xf20) and the process gets SIGILL: Debian's libLLVM,
+built with AltiVec, dies on load.
+
+Enable VMX in the CPU features (CPU_FTR_ALTIVEC_COMP) so code built with
+AltiVec runs, but keep AltiVec out of the user-visible features (AT_HWCAP)
+and out of /proc/cpuinfo. VMX128 lacks parts of AltiVec (the integer
+multiply and sum family): libraries that choose AltiVec at run time
+(libjpeg-turbo reads /proc/cpuinfo, pixman, glibc) must keep their scalar
+paths, or they die with SIGILL on the missing instructions.
+
+An earlier version of this patch advertised AltiVec and did exactly that
+(NetSurf died on the first JPEG; pixman needed PIXMAN_DISABLE=vmx).
+
+---
+--- a/arch/powerpc/include/asm/cputable.h	2026-10-29 03:38:23.833342771 -0700
++++ b/arch/powerpc/include/asm/cputable.h	2026-10-29 03:38:23.822126308 -0700
+@@ -464,7 +464,7 @@
+ 	    CPU_FTR_UNALIGNED_LD_STD | CPU_FTR_DABRX)
+ #define CPU_FTRS_XENON (CPU_FTR_LWSYNC | \
+ 	    CPU_FTR_PPCAS_ARCH_V2 | CPU_FTR_CTRL | \
+-	    CPU_FTR_MMCRA | CPU_FTR_SMT | \
++	    CPU_FTR_ALTIVEC_COMP | CPU_FTR_MMCRA | CPU_FTR_SMT | \
+ 	    CPU_FTR_CELL_TB_BUG )
+ #define CPU_FTRS_PA6T (CPU_FTR_LWSYNC | \
+ 	    CPU_FTR_PPCAS_ARCH_V2 | CPU_FTR_ALTIVEC_COMP | \
+--- a/arch/powerpc/kernel/cpu_specs_book3s_64.h	2026-10-29 03:38:23.834180659 -0700
++++ b/arch/powerpc/kernel/cpu_specs_book3s_64.h	2026-10-29 03:38:23.824267232 -0700
+@@ -504,6 +504,10 @@
+ 		.pvr_value        = 0x00710000,
+ 		.cpu_name        = "Xenon",
+ 		.cpu_features        = CPU_FTRS_XENON,
++		/* VMX is enabled (CPU_FTR_ALTIVEC_COMP: no vector-unavailable SIGILL for
++		 * code built with AltiVec), but not advertised: VMX128 lacks parts of
++		 * AltiVec, and libraries that choose AltiVec at run time (libjpeg-turbo,
++		 * pixman) then die on the missing instructions */
+ 		.cpu_user_features    = COMMON_USER_PPC64 | PPC_FEATURE_SMT,
+ 		.mmu_features        = MMU_FTRS_XENON,
+ 		.icache_bsize        = 128,
+--- a/arch/powerpc/kernel/setup-common.c	2026-10-29 03:38:23.834249139 -0700
++++ b/arch/powerpc/kernel/setup-common.c	2026-10-29 03:38:23.825932942 -0700
+@@ -242,7 +242,10 @@
+ 	else
+ 		seq_printf(m, "unknown (%08x)", pvr);
+ 
+-	if (cpu_has_feature(CPU_FTR_ALTIVEC))
++	/* only when user space is told (Xenon enables VMX without advertising it,
++	 * and libjpeg-turbo reads this line to pick its AltiVec code) */
++	if (cpu_has_feature(CPU_FTR_ALTIVEC) &&
++	    (cur_cpu_spec->cpu_user_features & PPC_FEATURE_HAS_ALTIVEC))
+ 		seq_puts(m, ", altivec supported");
+ 
+ 	seq_putc(m, '\n');
