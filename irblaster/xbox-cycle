@@ -5,14 +5,14 @@
 # Exit 0 when Linux answers SSH with the GPU module loaded, 1 otherwise. Log: netboot/cycle.log
 # one cycle at a time: two scripts pressing IR buttons at once leave the console in Aurora
 exec 9>/tmp/xbox-cycle.lock; flock 9
-X=$(dirname "$(readlink -f "$0")")/xir
-LOG=${XBOX_CYCLE_LOG:-$HOME/xbox-cycle.log}
-SSH="ssh -o ConnectTimeout=4 -o BatchMode=yes ${XBOX_SSH_OPTS:-} root@${XBOX_HOST:-10.0.0.206}"
+X=/home/arelyx/peer_pressure/netboot/irblaster/xir
+LOG=/home/arelyx/peer_pressure/netboot/cycle.log
+SSH="ssh -o ConnectTimeout=4 -o BatchMode=yes -i /home/arelyx/.ssh/lake root@10.0.0.206"
 log() { echo "$(date '+%F %T') $*" | tee -a $LOG; }
-# Aurora does not always answer ping (FTP up, ICMP silent): the script then took the console
-# for off and pressed Media Center power into a running Aurora five times. Ask its FTP port too.
-alive() { ping -c1 -W1 ${XBOX_HOST:-10.0.0.206} >/dev/null 2>&1 || ping -c1 -W1 ${XBOX_DASH_HOST:-10.0.0.205} >/dev/null 2>&1 ||
-          timeout 2 bash -c "exec 3<>/dev/tcp/${XBOX_DASH_HOST:-10.0.0.205}/21" 2>/dev/null; }
+# Aurora does not always answer ping (2026-10-28: FTP up, ICMP silent; the script took the
+# console for off and pressed Media Center power into a running Aurora five times): ask its FTP port too
+alive() { ping -c1 -W1 10.0.0.206 >/dev/null 2>&1 || ping -c1 -W1 10.0.0.205 >/dev/null 2>&1 ||
+          timeout 2 bash -c 'exec 3<>/dev/tcp/10.0.0.205/21' 2>/dev/null; }
 for attempt in 1 2 3 4 5; do
   log "cycle attempt $attempt"
   if alive || [ "$attempt" -gt 1 ] || [ "${1:-}" = force ]; then
@@ -21,8 +21,16 @@ for attempt in 1 2 3 4 5; do
     $X p >/dev/null
     t0=$(date +%s); while alive && [ $(( $(date +%s) - t0 )) -lt 30 ]; do sleep 1; done
   fi
-  sleep 10
-  if alive; then log "still on after power press, pressing again"; $X p >/dev/null; sleep 12; fi
+  # an off console looks like a frozen one (nothing answers), and the press above
+  # turns it on into Aurora, which answers only after 20 s or more: watch for 60 s,
+  # and if it came up, turn it off again before the Media Center press (2026-10-29:
+  # pressing Media Center into a booting Aurora left the console off after 5 attempts)
+  t0=$(date +%s); while ! alive && [ $(( $(date +%s) - t0 )) -lt 60 ]; do sleep 2; done
+  if alive; then
+    log "on after power press (was off), pressing again"; $X p >/dev/null
+    t0=$(date +%s); while alive && [ $(( $(date +%s) - t0 )) -lt 30 ]; do sleep 1; done
+    sleep 5
+  fi
   $X mce >/dev/null
   t0=$(date +%s)
   while [ $(( $(date +%s) - t0 )) -lt 240 ]; do
@@ -30,7 +38,7 @@ for attempt in 1 2 3 4 5; do
       log "linux up after $(( $(date +%s) - t0 ))s ($(timeout 6 $SSH /opt/fatx/smc.py powerup 2>/dev/null | sed 's/.*-> //'))"
       exit 0
     fi
-    if timeout 3 curl -s --user xboxftp:xboxftp ftp://${XBOX_DASH_HOST:-10.0.0.205}/ >/dev/null 2>&1; then log "landed in Aurora"; break; fi
+    if timeout 3 curl -s --user xboxftp:xboxftp ftp://10.0.0.205/ >/dev/null 2>&1; then log "landed in Aurora"; break; fi
     sleep 4
   done
 done
