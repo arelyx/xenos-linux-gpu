@@ -14,7 +14,7 @@ StandardOutput=journal
 RuntimeDirectory=icewm
 RuntimeDirectoryMode=0700
 # LD_LIBRARY_PATH also gives GL clients in the session (EGL on X11 through DRI3) the Xenos Mesa
-Environment=HOME=/root XDG_RUNTIME_DIR=/run/icewm PIXMAN_DISABLE=vmx LD_LIBRARY_PATH=/opt/mesa-xenos/lib GL_READY_KEEP_SESSION=1
+Environment=HOME=/root XDG_RUNTIME_DIR=/run/icewm PIXMAN_DISABLE=vmx JSIMD_FORCENONE=1 LD_LIBRARY_PATH=/opt/mesa-xenos/lib GL_READY_KEEP_SESSION=1
 
 [Install]
 WantedBy=graphical.target
