@@ -15,3 +15,7 @@ glamor -scroll500: 40000 trep @   0.1816 msec (  5510.0/sec): Scroll 500x500 pix
 glamor stalls 0 timeouts 0
 xcopytest PASS
 glrt-draw-us 64x64 draw glFinish: 88.2 us per batch
+glmark2 build:use-vbo=true: FPS: 898
+glmark2 texture:texture-filter=linear: FPS: 836
+glmark2 shading:shading=phong: FPS: 762
+glmark2 jellyfish: FPS: 488

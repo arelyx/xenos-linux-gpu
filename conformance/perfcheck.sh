@@ -1,6 +1,7 @@
 #!/bin/bash
-# perfcheck.sh [baseline] [out]: run x11perf (glamor), glrt and xcopytest on the console and
-# compare against a baseline from an earlier run. Flags any test more than 7% slower.
+# perfcheck.sh [baseline] [out]: run x11perf (glamor), glrt, xcopytest and four glmark2-es2 scenes
+# on the console and compare against a baseline from an earlier run. Flags any test
+# more than 7% slower.
 # Stops the desktop session (icewm-glamor or xfce-glamor) for the run and starts it again afterwards.
 # perfcheck.sh --compare <baseline> <run>: only compare two saved runs.
 here=$(dirname "$0")
@@ -16,6 +17,9 @@ ssh $ssh_opts root@$host "
   echo \"xcopytest \$(DISPLAY=:0 timeout 300 /opt/xegpu/xtest/xcopytest 2>&1 | tail -1)\"
   pkill -x Xorg; sleep 2
   for i in 1 2 3; do LD_LIBRARY_PATH=/opt/mesa-xenos/lib /opt/xegpu/gltest/glrt 64 2000 draw; done | sort -k4 -n | sed -n 2p | sed 's/^/glrt-draw-us /'
+  for s in build:use-vbo=true texture:texture-filter=linear shading:shading=phong jellyfish; do
+    JSIMD_FORCENONE=1 LD_LIBRARY_PATH=/opt/mesa-xenos/lib timeout 60 glmark2-es2-drm --off-screen -b \$s:duration=5 2>&1 | grep -o 'FPS: [0-9]*' | head -1 | sed \"s/^/glmark2 \$s: /\"
+  done
   [ -n \"\$sess\" ] && systemctl start \$sess
   true" | tee "$out"
 fi
@@ -29,6 +33,8 @@ def load(p):
         if m: d[m[1]] = float(m[2])
         m = re.search(r'glrt-draw-us.*?([\d.]+) us', l)
         if m: d['glrt(us, lower is better)'] = -float(m[1])
+        m = re.match(r'glmark2 (\S+): FPS: (\d+)', l)
+        if m: d['glmark2 ' + m[1].split(':')[0] + ' ' + m[1].split(':')[-1].split('=')[-1]] = float(m[2])
     return d
 b, n = load(sys.argv[1]), load(sys.argv[2])
 bad = 0
