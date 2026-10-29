@@ -1,0 +1,66 @@
+From 4ac31f84a784695c172e7d30e7643bf1f7dacfe7 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 12:09:27 -0700
+Subject: [PATCH] freedreno/a2xx: export a constant position when the VS writes
+ none
+
+A vertex shader may leave gl_Position unwritten (NIR drops a copy from an
+output that is never written). ctx->position stayed an uninitialized SSA
+source, the scheduler waited on it forever and asserted block_idx == -1
+(piglit arb_separate_shader_object-GetProgramPipelineiv). Export
+(0, 0, 0, 1) instead.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c     | 13 +++++++++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_private.h |  1 +
+ 2 files changed, 14 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 24ce888..b367085 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -731,6 +731,7 @@ store_output(struct ir2_context *ctx, nir_src src, unsigned slot,
+       switch (slot) {
+       case VARYING_SLOT_POS:
+          ctx->position = make_src(ctx, src);
++         ctx->position_written = true;
+          idx = 62;
+          break;
+       case VARYING_SLOT_PSIZ:
+@@ -1733,6 +1734,18 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+    emit_cf_list(ctx, &fxn->body);
+    /* TODO emit_block(ctx, fxn->end_block); */
+ 
++   /* gl_Position may be left unwritten (piglit GetProgramPipelineiv copies
++    * an output it never writes, so NIR drops the store). ctx->position was
++    * then an uninitialized SSA source that never became ready, and the
++    * scheduler asserted. Export a constant position instead. */
++   if (so->type == MESA_SHADER_VERTEX && !ctx->position_written) {
++      struct ir2_instr *pos = instr_create_alu(ctx, nir_op_mov, 4);
++      pos->src[0] = load_const(ctx, (float[]){0.0f, 0.0f, 0.0f, 1.0f}, 4);
++      pos->alu.export = 62;
++      ctx->position = pos->src[0];
++      ctx->position_written = true;
++   }
++
+    if (so->type == MESA_SHADER_VERTEX)
+       extra_position_exports(ctx, binning);
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index a707541..a003edd 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -148,6 +148,7 @@ struct ir2_context {
+ 
+    /* ssa index of position output */
+    struct ir2_src position;
++   bool position_written;
+ 
+    /* to translate SSA ids to instruction ids */
+    int16_t ssa_map[4096];
+-- 
+2.53.0
+
