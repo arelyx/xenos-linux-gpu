@@ -194,6 +194,10 @@ With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB p
 
 A sequencer runs 64 pixels (or vertices) together, and a predicated control-flow instruction (conditional exec, conditional jump, loop end) takes one decision for all of them: the `(p0)` form if any active pixel has the predicate set, the `(!p0)` form only if none has (Xenia's `ucode.h`, from the IPR2015-00325 sequencer specification). ALU and fetch instructions are predicated per pixel. So a `break` inside a divergent `if`, compiled as a `(p0)` jump, takes every pixel out of the loop. Mesa 0077 keeps an "active" register per pixel for such loops, predicates the body on it and leaves through the back edge once no pixel is active. Two traps: a pixel killed by `discard` stops getting register writes and keeps `active` set (the loop never ends), and a loop nested inside the predicated body decides its own jumps under that predicate; both kept plain jumps.
 
+### 38. CF exec addresses are 12 bits
+
+An exec control-flow instruction's address field is 12 bits on Xenos (Xenia's `ucode.h`); Adreno 200's layout, which freedreno's `instr-a2xx.h` followed, has 9 bits and three reserved. A shader with more than 512 ALU/fetch instructions wrapped the address (dEQP `uniform_api.random.3`). Jump addresses are 13 bits in both.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

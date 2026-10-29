@@ -1,0 +1,208 @@
+From 2be934024fde33450d4bcdf0b8df60e796505e0d Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 09:46:53 -0700
+Subject: [PATCH] freedreno/a2xx: big shaders on Xenos: live ranges for
+ internal instrs, 12-bit exec address, larger tables
+
+dEQP uniform_api.random.3 (a straight-line vertex shader with ~70
+fetches, 143 uniforms and 93 immediates) hit four limits in turn:
+- internal instructions (predicate setup, kills) got no live range
+  (block_idx_free 0) and held their registers to the end of the shader,
+  ~30 of 64 here: give every instruction a range at creation and keep
+  internal predicate-stack uses in it;
+- IR2_MAX_SCHED 0x400 -> 0x800, as IR2_MAX_INSTR;
+- the CF exec address is 12 bits on Xenos (Xenia ucode.h); the a2xx
+  struct had 9 + 3 reserved and wrapped past 512 instructions, so the
+  fetch patch offsets pointed into garbage;
+- fd2 immediates[64] overflowed silently: 128, with a compile error past.
+Also fetch_info 64 -> 256 (asserted), and fetches lose their scheduling
+priority over ALU once 48 registers are in use.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/freedreno/ir2/instr-a2xx.h                |  5 ++--
+ .../drivers/freedreno/a2xx/fd2_program.h      |  2 +-
+ src/gallium/drivers/freedreno/a2xx/ir2.c      | 12 +++++++--
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  2 +-
+ .../drivers/freedreno/a2xx/ir2_assemble.c     |  1 +
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 25 +++++++++++++++----
+ .../drivers/freedreno/a2xx/ir2_private.h      |  2 +-
+ 7 files changed, 37 insertions(+), 12 deletions(-)
+
+diff --git a/src/freedreno/ir2/instr-a2xx.h b/src/freedreno/ir2/instr-a2xx.h
+index cddbfd7..be4929f 100644
+--- a/src/freedreno/ir2/instr-a2xx.h
++++ b/src/freedreno/ir2/instr-a2xx.h
+@@ -197,8 +197,9 @@ typedef enum {
+ } instr_alloc_type_t;
+ 
+ typedef struct A2XX_PACKED {
+-   uint16_t address : 9;
+-   uint8_t reserved0 : 3;
++   /* 12 bits on Xenos (Xenia ucode.h); the top 3 read as reserved on a2xx.
++    * 9 wrapped past 512 instructions (dEQP uniform_api.random.3) */
++   uint16_t address : 12;
+    uint8_t count : 3;
+    uint8_t yeild : 1;
+    uint16_t serialize : 12;
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index 037eb14..bbd2ab8 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -30,7 +30,7 @@ struct fd2_shader_stateobj {
+    struct {
+       uint32_t val[4];
+       unsigned ncomp;
+-   } immediates[64];
++   } immediates[128];   /* 64 overflowed: dEQP uniform_api.random.3 */
+ 
+    bool writes_psize;
+    bool need_param;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index b64acc2..85c8e3f 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -287,9 +287,17 @@ sched_next(struct ir2_context *ctx, struct ir2_sched_instr *sched)
+       return -1;
+    }
+ 
+-   /* priority to FETCH instructions */
++   /* priority to FETCH instructions, unless registers run short: each fetch
++    * takes a register its ALU users free, and a long run of fetches first
++    * ran out of the 64 (dEQP uniform_api.random.3: assert idx != 64) */
++   unsigned regs_used = 0;
++   bool alu_avail = false;
++   for (unsigned i = 0; i < 64; i++)
++      regs_used += !!(ctx->reg_state[i / 8] >> (i % 8 * 4) & 0xf);
++   ir2_foreach_avail (instr)
++      alu_avail |= instr->type == IR2_ALU;
+    ir2_foreach_avail (instr) {
+-      if (instr->type == IR2_ALU)
++      if (instr->type == IR2_ALU || (regs_used >= 48 && alu_avail))
+          continue;
+ 
+       ra_src_free(ctx, instr);
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index 617daac..880486e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -43,7 +43,7 @@ struct ir2_shader_info {
+ 
+    /* fetch instruction info for patching */
+    uint16_t num_fetch_instrs;
+-   struct ir2_fetch_info fetch_info[64];
++   struct ir2_fetch_info fetch_info[256];   /* 64 overflowed: dEQP uniform_api.random.3 */
+ };
+ 
+ /* marks an inputs[] entry that no varying was assigned to */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index c417506..7595262 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -449,6 +449,7 @@ assemble(struct ir2_context *ctx, bool binning)
+ 
+       /* info for patching */
+       if (is_fetch) {
++         assert(ctx->info->num_fetch_instrs < ARRAY_SIZE(ctx->info->fetch_info));
+          struct ir2_fetch_info *info =
+             &ctx->info->fetch_info[ctx->info->num_fetch_instrs++];
+          info->offset = i * 3; /* add cf offset later */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index 480854d..24ce888 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -324,6 +324,8 @@ load_const(struct ir2_context *ctx, float *value_f, unsigned ncomp)
+          swiz |= swiz_set(j, i);
+       }
+       so->num_immediates++;
++      if (so->num_immediates >= ARRAY_SIZE(so->immediates))
++         compile_error(ctx, "too many immediates\n");
+    }
+    so->immediates[idx].ncomp = imm_ncomp;
+ 
+@@ -437,9 +439,22 @@ ir2_instr_create(struct ir2_context *ctx, int type)
+    instr->block_idx = ctx->block_idx;
+    instr->pred = ctx->pred;
+    instr->is_ssa = true;
++   /* give every result a live range (internal instructions - predicates,
++    * kills - left block_idx_free at 0 and held their register to the end of
++    * the shader: 30 of the 64 in dEQP uniform_api.random.3) */
++   update_range(ctx, &instr->ssa);
+    return instr;
+ }
+ 
++/* an internal use of an earlier result (predicate stack): keep its live
++ * range right when the use is in a deeper loop */
++static struct ir2_src
++use_ssa(struct ir2_context *ctx, unsigned idx)
++{
++   update_range(ctx, &ctx->instr[idx].ssa);
++   return ir2_src(idx, 0, IR2_SRC_SSA);
++}
++
+ static struct ir2_instr *
+ instr_create_alu(struct ir2_context *ctx, nir_op opcode, unsigned ncomp)
+ {
+@@ -1298,7 +1313,7 @@ pred_begin(struct ir2_context *ctx, unsigned *saved_pred, unsigned *saved_idx)
+    if (*saved_pred) {
+       instr->alu.vector_opc = PRED_SETNE_PUSHv;
+       instr->src[1] = instr->src[0];
+-      instr->src[0] = ir2_src(*saved_idx, 0, IR2_SRC_SSA);
++      instr->src[0] = use_ssa(ctx, *saved_idx);
+       instr->src[0].swizzle = IR2_SWIZZLE_XXXX;
+       instr->src[1].swizzle = IR2_SWIZZLE_XXXX;
+       instr->src_count = 2;
+@@ -1314,7 +1329,7 @@ pred_end(struct ir2_context *ctx, unsigned saved_pred, unsigned saved_idx)
+ {
+    if (saved_pred) {
+       struct ir2_instr *instr = ir2_instr_create(ctx, IR2_ALU);
+-      instr->src[0] = ir2_src(ctx->pred_idx, 0, IR2_SRC_SSA);
++      instr->src[0] = use_ssa(ctx, ctx->pred_idx);
+       instr->src_count = 1;
+       instr->ssa.ncomp = 1;
+       instr->alu.vector_opc = VECTOR_NONE;
+@@ -1390,7 +1405,7 @@ emit_if(struct ir2_context *ctx, nir_if *nif)
+    if (pred) {
+       instr->alu.vector_opc = PRED_SETNE_PUSHv;
+       instr->src[1] = instr->src[0];
+-      instr->src[0] = ir2_src(pred_idx, 0, IR2_SRC_SSA);
++      instr->src[0] = use_ssa(ctx, pred_idx);
+       instr->src[0].swizzle = IR2_SWIZZLE_XXXX;
+       instr->src[1].swizzle = IR2_SWIZZLE_XXXX;
+       instr->src_count = 2;
+@@ -1407,7 +1422,7 @@ emit_if(struct ir2_context *ctx, nir_if *nif)
+     * and if the else branch is simple, can just flip ctx->pred instead
+     */
+    instr = ir2_instr_create(ctx, IR2_ALU);
+-   instr->src[0] = ir2_src(ctx->pred_idx, 0, IR2_SRC_SSA);
++   instr->src[0] = use_ssa(ctx, ctx->pred_idx);
+    instr->src_count = 1;
+    instr->ssa.ncomp = 1;
+    instr->alu.vector_opc = VECTOR_NONE;
+@@ -1422,7 +1437,7 @@ emit_if(struct ir2_context *ctx, nir_if *nif)
+    /* restore predicate for nested predicates */
+    if (pred) {
+       instr = ir2_instr_create(ctx, IR2_ALU);
+-      instr->src[0] = ir2_src(ctx->pred_idx, 0, IR2_SRC_SSA);
++      instr->src[0] = use_ssa(ctx, ctx->pred_idx);
+       instr->src_count = 1;
+       instr->ssa.ncomp = 1;
+       instr->alu.vector_opc = VECTOR_NONE;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 1839c41..a707541 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -176,7 +176,7 @@ struct ir2_context {
+    /* Xenos has room for 2048 instructions per stage (SQ_INST_STORE_MANAGMENT
+     * 0x00010800); a20x needs far less. Sizes are checked where entries are added. */
+ #define IR2_MAX_INSTR 0x800
+-#define IR2_MAX_SCHED 0x400
++#define IR2_MAX_SCHED 0x800   /* as IR2_MAX_INSTR: dEQP uniform_api.random.3 schedules more than 0x400 */
+    struct ir2_instr instr[IR2_MAX_INSTR];
+    unsigned instr_count;
+ 
+-- 
+2.53.0
+
