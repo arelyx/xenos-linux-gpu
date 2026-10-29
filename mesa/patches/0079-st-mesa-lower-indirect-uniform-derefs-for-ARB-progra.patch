@@ -1,0 +1,40 @@
+From 3ce6c0dbe03aa24d365e0e830a2a2742c33c68f7 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 11:15:29 -0700
+Subject: [PATCH] st/mesa: lower indirect uniform derefs for ARB programs
+ without indirect_const_addr
+
+The GLSL path already lowers indirect uniform derefs to if/else trees
+when the driver lacks indirect constant addressing. ARB programs that
+index parameters with the address register skipped that step, so a2xx
+asserted on a non-constant load_uniform offset (piglit vp-address-01).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/mesa/state_tracker/st_program.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/mesa/state_tracker/st_program.c b/src/mesa/state_tracker/st_program.c
+index 058de4c..34ff7d6 100644
+--- a/src/mesa/state_tracker/st_program.c
++++ b/src/mesa/state_tracker/st_program.c
+@@ -395,6 +395,14 @@ st_prog_to_nir_postprocess(struct st_context *st, nir_shader *nir,
+    NIR_PASS(_, nir, nir_lower_reg_intrinsics_to_ssa);
+    nir_validate_shader(nir, "after st/ptn lower_reg_intrinsics_to_ssa");
+ 
++   /* ARB programs can index parameters with the address register.  Drivers
++    * without indirect constant addressing get the same if/else lowering the
++    * GLSL path applies in st_glsl_to_nir.
++    */
++   if (!screen->shader_caps[nir->info.stage].indirect_const_addr)
++      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
++               nir_var_uniform, UINT32_MAX);
++
+    NIR_PASS(_, nir, st_nir_lower_wpos_ytransform, prog, screen);
+    NIR_PASS(_, nir, nir_lower_system_values);
+ 
+-- 
+2.53.0
+
