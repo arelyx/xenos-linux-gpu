@@ -109,7 +109,7 @@ static struct dma_fence *xe_fence_create(u64 seq)
 	return &f->base;
 }
 
-static int msm_compat;            /* report the driver name as "msm" so stock libdrm/Mesa accept it */
+static int msm_compat = 1;        /* report the driver name as "msm" so stock libdrm/Mesa accept it (0: GL clients silently render black) */
 module_param(msm_compat, int, 0444);
 MODULE_PARM_DESC(msm_compat, "Expose the DRM device as \"msm\" for Mesa freedreno (set at load)");
 static int msm_gpu_id = 290;
