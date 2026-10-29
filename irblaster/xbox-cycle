@@ -9,7 +9,10 @@ X=$(dirname "$(readlink -f "$0")")/xir
 LOG=${XBOX_CYCLE_LOG:-$HOME/xbox-cycle.log}
 SSH="ssh -o ConnectTimeout=4 -o BatchMode=yes ${XBOX_SSH_OPTS:-} root@${XBOX_HOST:-10.0.0.206}"
 log() { echo "$(date '+%F %T') $*" | tee -a $LOG; }
-alive() { ping -c1 -W1 ${XBOX_HOST:-10.0.0.206} >/dev/null 2>&1 || ping -c1 -W1 ${XBOX_DASH_HOST:-10.0.0.205} >/dev/null 2>&1; }
+# Aurora does not always answer ping (FTP up, ICMP silent): the script then took the console
+# for off and pressed Media Center power into a running Aurora five times. Ask its FTP port too.
+alive() { ping -c1 -W1 ${XBOX_HOST:-10.0.0.206} >/dev/null 2>&1 || ping -c1 -W1 ${XBOX_DASH_HOST:-10.0.0.205} >/dev/null 2>&1 ||
+          timeout 2 bash -c "exec 3<>/dev/tcp/${XBOX_DASH_HOST:-10.0.0.205}/21" 2>/dev/null; }
 for attempt in 1 2 3 4 5; do
   log "cycle attempt $attempt"
   if alive || [ "$attempt" -gt 1 ] || [ "${1:-}" = force ]; then
