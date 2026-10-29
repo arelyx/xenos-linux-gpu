@@ -217,6 +217,10 @@ An earlier version of this rule said a0 works in vertex shaders only. That was t
 
 Mesa's a2xx driver has no occlusion-query provider, so `GL_SAMPLES_PASSED` returns 0 (piglit `occlusion_query_conform` `GetObjivAval_multi2`; `gltest`-style probe `gloq`, 2026-10-29). Xenos doesn't offer a way to fill it: xsdk (github.com/xenosworks/xsdk, `docs/HARDWARE.md`, "Queries and events" and "Occlusion queries, vulkan4xenon milestone 28") found that every sequence sending `ZPASS_DONE`, as `PM4_EVENT_WRITE_ZPD` the way D3D does, or as Adreno 3xx's sequence, wedges the GPU at the first event with the count never written, and that the Yamato sample registers don't count. The visibility query (`PM4_VIZ_QUERY`, `PA_SC_VIZ_QUERY_STATUS_0/1`) works but only says whether a draw rasterized past hierarchical Z, not whether any sample passed the depth test. With no GPU reset here (rule 21), a wedge costs a power cycle, so this driver doesn't try.
 
+### 42. Two border colors, and point sampling never reads the border
+
+The fetch constant's border color (dword 5 bits 0-1) offers (0, 0, 0, 0) and (1, 1, 1, 1); xsdk measured the black border's alpha 0. With point sampling the hardware doesn't read the border at all: `CLAMP_TO_BORDER` and `MIRROR_CLAMP_TO_BORDER` behave as clamp to edge, whatever the color (`gltest/glborder`, magnification, 2026-10-29). Linear filtering reads it. Mesa 0083 emulates other colors: with point sampling the shader selects the color outside [0, 1]; with linear filtering it samples again from a copy of the fetch constant with the white border, and black + (white - black) * color gives the blend exactly. A 1D texture is sampled as 2D one texel high, so its `wrap_t` must not reach a border either.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).

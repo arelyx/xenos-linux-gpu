@@ -1,0 +1,448 @@
+From 8cf1cdf2382c22cb27d5cfe0d7cb941580f49d85 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:21:05 -0700
+Subject: [PATCH] freedreno/a2xx: emulate texture border colors on Xenos
+
+Xenos has two border colors, (0, 0, 0, 0) and (1, 1, 1, 1) (fetch
+constant dword 5 bits 0-1), and with point sampling it never reads the
+border: CLAMP_TO_BORDER and MIRROR_CLAMP_TO_BORDER clamp to the edge.
+Linear filtering does read it.
+
+- Pick the white border when the border color is white.
+- Fragment shader variants keyed per sampler (ir2_shader_variant.border),
+  the color in IR2_BORDER_CONST + sampler with the view's swizzle:
+  - nearest: select the color where a coordinate on a border axis is
+    outside [0, 1] (|x| > 1 mirrored once);
+  - linear, any other color: fetch again from a copy of the fetch
+    constant with the white border, in a vertex texture slot left free
+    (31 - k, up to six, with no more than 8 vertex samplers); per channel
+    black + (white - black) * color, exact for any filter and level.
+- 1D textures are sampled as 2D one texel high: force wrap_t to repeat,
+  GL_CLAMP blended the border in along t.
+
+piglit: 29 border tests pass (texwrap *bordercolor*, tex3d-depth1,
+tex-border-1, gl-1.4-tex1d-2dborder). Not covered: rectangle textures,
+16F/32F formats, more than six linear samplers. dEQP 17063/17075, no
+regressions; performance unchanged.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c |  56 ++++++++-
+ .../drivers/freedreno/a2xx/fd2_program.c      | 114 +++++++++++++++++-
+ .../drivers/freedreno/a2xx/fd2_program.h      |   4 +
+ src/gallium/drivers/freedreno/a2xx/ir2.c      |   1 +
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  12 ++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  |  73 +++++++++++
+ .../drivers/freedreno/a2xx/ir2_private.h      |   1 +
+ 7 files changed, 250 insertions(+), 11 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index 5201972..d4fbe56 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -136,10 +136,10 @@ fd2_blend_control(struct fd_context *ctx, struct fd2_blend_stateobj *blend)
+ typedef uint32_t texmask;
+ 
+ static texmask
+-emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+-             struct fd_texture_stateobj *tex, unsigned samp_id, texmask emitted)
++emit_texture_at(struct fd_ringbuffer *ring, struct fd_context *ctx,
++                struct fd_texture_stateobj *tex, unsigned samp_id, texmask emitted,
++                unsigned const_idx, int border)
+ {
+-   unsigned const_idx = fd2_get_const_idx(ctx, tex, samp_id);
+    static const struct fd2_sampler_stateobj dummy_sampler = {};
+    static const struct fd2_pipe_sampler_view dummy_view = {};
+    const struct fd2_sampler_stateobj *sampler;
+@@ -180,7 +180,12 @@ emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+                 (u_minify(prsc->height0, base_level) - 1) << 11 |
+                 (u_minify(prsc->depth0, base_level) - 1) << 22;
+    }
+-   OUT_RING(ring, sampler->tex0 | tex0);
++   /* a 1D texture is sampled as 2D, one texel high: GL ignores wrap_t, so
++    * the second axis must not reach a border (texwrap 1D) */
++   uint32_t stex0 = sampler->tex0;
++   if (fd2_xenos && view->base.target == PIPE_TEXTURE_1D)
++      stex0 = (stex0 & ~A2XX_SQ_TEX_0_CLAMP_Y__MASK) | A2XX_SQ_TEX_0_CLAMP_Y(SQ_TEX_WRAP);
++   OUT_RING(ring, stex0 | tex0);
+    if (rsc)
+       OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, base_level, 0), view->tex1, 0);
+    else
+@@ -201,14 +206,42 @@ emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
+    }
+    OUT_RING(ring, sampler->tex4 | tex4);
+ 
++   /* Xenos border colors (dword 5 bits 0-1): 0 is (0, 0, 0, 0), 1 is
++    * (1, 1, 1, 1) (Xenia xenos.h BorderColor; xsdk measured the black
++    * border's alpha 0). Pick white for a white border, as shadow maps use */
++   uint32_t tex5 = view->tex5;
++   if (border >= 0)   /* border emulation's copies: black, or white */
++      tex5 |= border;
++   else if (fd2_xenos && sampler != &dummy_sampler &&
++       sampler->base.border_color.f[0] == 1.0f && sampler->base.border_color.f[1] == 1.0f &&
++       sampler->base.border_color.f[2] == 1.0f && sampler->base.border_color.f[3] == 1.0f)
++      tex5 |= 1;
++
+    if (rsc && rsc->b.b.last_level)
+-      OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, 1, 0), view->tex5, 0);
++      OUT_RELOC(ring, rsc->bo, fd_resource_offset(rsc, 1, 0), tex5, 0);
+    else
+-      OUT_RING(ring, view->tex5);
++      OUT_RING(ring, tex5);
+ 
+    return (1 << const_idx);
+ }
+ 
++static texmask
++emit_texture(struct fd_ringbuffer *ring, struct fd_context *ctx,
++             struct fd_texture_stateobj *tex, unsigned samp_id, texmask emitted)
++{
++   unsigned const_idx = fd2_get_const_idx(ctx, tex, samp_id);
++   int border = -1;
++
++   /* border emulation with linear filtering: the original black */
++   if (fd2_xenos && tex == &ctx->tex[MESA_SHADER_FRAGMENT] && ctx->prog.fs && samp_id < 12) {
++      uint8_t key[12];
++      fd2_border_key(ctx, ctx->prog.fs, key);
++      if (key[samp_id] & IR2_BORDER_LINEAR)
++         border = 0;
++   }
++   return emit_texture_at(ring, ctx, tex, samp_id, emitted, const_idx, border);
++}
++
+ static void
+ emit_textures(struct fd_ringbuffer *ring, struct fd_context *ctx)
+ {
+@@ -224,6 +257,17 @@ emit_textures(struct fd_ringbuffer *ring, struct fd_context *ctx)
+    for (i = 0; i < fragtex->num_samplers; i++)
+       if (fragtex->samplers[i])
+          emitted |= emit_texture(ring, ctx, fragtex, i, emitted);
++
++   /* border emulation with linear filtering: white-border copies */
++   if (fd2_xenos && ctx->prog.fs) {
++      uint8_t key[12];
++      fd2_border_key(ctx, ctx->prog.fs, key);
++      for (i = 0; i < 12; i++) {
++         if (key[i] & IR2_BORDER_LINEAR)
++            emit_texture_at(ring, ctx, fragtex, i, 0,
++                            IR2_BORDER_DUP_SLOT(key[i] & 0x7), 1);
++      }
++   }
+ }
+ 
+ void
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 16e2928..bfa99b9 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -140,6 +140,8 @@ fd2_shader_state_create(struct pipe_context *pctx,
+                continue;
+ 
+             nir_tex_instr *tex = nir_instr_as_tex(instr);
++            if (tex->sampler_index < 16)
++               so->tex_samplers |= BITFIELD_BIT(tex->sampler_index);
+             if (tex->op == nir_texop_txl)
+                so->tex_lod_samplers |= BITFIELD_BIT(tex->sampler_index);
+          }
+@@ -148,10 +150,10 @@ fd2_shader_state_create(struct pipe_context *pctx,
+ 
+    ir2_compile(so, 0, NULL);
+ 
+-   /* Free FS NIR now.  VS NIR will need to stick around for the draw variant
+-    * later.
++   /* Free FS NIR now, unless border emulation may need variants of it
++    * (Xenos); VS NIR will need to stick around for the draw variant later.
+     */
+-   if (so->nir->info.stage == MESA_SHADER_FRAGMENT) {
++   if (so->nir->info.stage == MESA_SHADER_FRAGMENT && !(so->is_xenos && so->tex_samplers)) {
+       ralloc_free(so->nir);
+       so->nir = NULL;
+    }
+@@ -236,6 +238,66 @@ tex_mag_switchover(struct fd_context *ctx, struct fd2_shader_stateobj *so)
+    return mask;
+ }
+ 
++static bool
++wrap_is_border(unsigned wrap)
++{
++   return wrap == PIPE_TEX_WRAP_CLAMP_TO_BORDER || wrap == PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER;
++}
++
++/* which samplers the fragment shader must give their border color itself
++ * (IR2_BORDER_CONST): point sampling never reads the hardware border */
++void
++fd2_border_key(struct fd_context *ctx, struct fd2_shader_stateobj *fp, uint8_t key[12])
++   assert_dt
++{
++   struct fd_texture_stateobj *tex = &ctx->tex[MESA_SHADER_FRAGMENT];
++
++   unsigned ndup = 0;
++
++   memset(key, 0, 12);
++   u_foreach_bit (i, fp->tex_samplers & tex->valid_samplers & 0xfff) {
++      const struct pipe_sampler_state *ss = tex->samplers[i];
++      const struct pipe_sampler_view *view = i < tex->num_textures ? tex->textures[i] : NULL;
++
++      if (!ss || !view || ss->compare_mode != PIPE_TEX_COMPARE_NONE)
++         continue;
++      if (view->target != PIPE_TEXTURE_1D && view->target != PIPE_TEXTURE_2D &&
++          view->target != PIPE_TEXTURE_3D)
++         continue;
++
++      unsigned dims = view->target == PIPE_TEXTURE_1D ? 1 : view->target == PIPE_TEXTURE_2D ? 2 : 3;
++      const unsigned wrap[3] = {ss->wrap_s, ss->wrap_t, ss->wrap_r};
++      uint8_t k = 0;
++      for (unsigned a = 0; a < dims; a++) {
++         if (wrap_is_border(wrap[a]))
++            k |= 1 << a;
++         if (wrap[a] == PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER)
++            k |= IR2_BORDER_MIRROR;
++      }
++      if (ss->mag_img_filter == PIPE_TEX_FILTER_NEAREST) {
++         if (k & IR2_BORDER_AXES)
++            key[i] = k | IR2_BORDER_NEAREST;
++         continue;
++      }
++
++      /* linear: the hardware's own border when it is (0, 0, 0, 0) or
++       * (1, 1, 1, 1); otherwise a second fetch constant with the white
++       * border, in a vertex texture slot left free (26-31 with no more than
++       * 8 vertex samplers) */
++      bool half = false;
++      for (unsigned a = 0; a < dims; a++)
++         half |= wrap[a] == PIPE_TEX_WRAP_CLAMP || wrap[a] == PIPE_TEX_WRAP_MIRROR_CLAMP;
++      if (!(k & IR2_BORDER_AXES) && !half)
++         continue;
++      const float *c = ss->border_color.f;
++      if ((c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 0.0f) ||
++          (c[0] == 1.0f && c[1] == 1.0f && c[2] == 1.0f && c[3] == 1.0f))
++         continue;
++      if (ndup < 6 && ctx->tex[MESA_SHADER_VERTEX].num_samplers <= 8)
++         key[i] = IR2_BORDER_LINEAR | ndup++;
++   }
++}
++
+ void
+ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+                  struct fd_program_stateobj *prog)
+@@ -288,8 +350,50 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+    }
+ 
+    vpi = &vp->variant[variant].info;
+-   fpi = &fp->variant[0].info;
+-   f = &fp->variant[0].f;
++   if (fp) {
++      /* fragment variant for the samplers' border emulation (variant 0 has
++       * none) */
++      unsigned fv = 0;
++      uint8_t key[12] = {0};
++      if (fp->nir && fp->is_xenos)
++         fd2_border_key(ctx, fp, key);
++      for (fv = 0; fv < ARRAY_SIZE(fp->variant); fv++) {
++         struct ir2_shader_variant *v = &fp->variant[fv];
++         if (!v->info.sizedwords) {
++            memcpy(v->border, key, sizeof(key));
++            ir2_compile(fp, fv, NULL);
++            break;
++         }
++         if (!memcmp(v->border, key, sizeof(key)))
++            break;
++      }
++      if (fv == ARRAY_SIZE(fp->variant)) {
++         fv--;
++         free(fp->variant[fv].info.dwords);
++         memset(&fp->variant[fv], 0, sizeof(fp->variant[fv]));
++         memcpy(fp->variant[fv].border, key, sizeof(key));
++         ir2_compile(fp, fv, NULL);
++      }
++      fpi = &fp->variant[fv].info;
++      f = &fp->variant[fv].f;
++
++      for (unsigned i = 0; i < 12; i++) {
++         if (!key[i])
++            continue;
++         const struct pipe_sampler_state *ss = ctx->tex[MESA_SHADER_FRAGMENT].samplers[i];
++         const struct pipe_sampler_view *view = ctx->tex[MESA_SHADER_FRAGMENT].textures[i];
++         /* the view's swizzle applies to the border as to the texels */
++         const unsigned char swz[4] = {view->swizzle_r, view->swizzle_g,
++                                       view->swizzle_b, view->swizzle_a};
++         union pipe_color_union color;
++         util_format_apply_color_swizzle(&color, &ss->border_color, swz, false);
++         fd2_emit_alu_consts(ctx, ring, (PS_CONST_BASE + IR2_BORDER_CONST + i) * 4,
++                             color.ui, 4);
++      }
++   } else {
++      fpi = NULL;
++      f = NULL;
++   }
+ 
+    /* clear/gmem2mem/mem2gmem need to be changed to remove this condition */
+    if (prog != &ctx->solid_prog && prog != &ctx->solid_z_prog &&
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index bbd2ab8..498c858 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -39,6 +39,7 @@ struct fd2_shader_stateobj {
+    uint16_t tex_lod_samplers;
+    uint16_t shadow_samplers;   /* read IR2_SHADOW_CONST + sampler */
+    uint16_t texround_samplers; /* read IR2_TEXROUND_CONST + sampler */
++   uint16_t tex_samplers;      /* samplers its texture instructions use */
+ 
+    /* note:
+     * fragment shader only has one variant
+@@ -54,4 +55,7 @@ void fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+ 
+ void fd2_prog_init(struct pipe_context *pctx);
+ 
++void fd2_border_key(struct fd_context *ctx, struct fd2_shader_stateobj *fp,
++                    uint8_t key[12]);
++
+ #endif /* FD2_PROGRAM_H_ */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 0fd8afc..eab8f93 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -491,6 +491,7 @@ ir2_compile(struct fd2_shader_stateobj *so, unsigned variant,
+    ctx->info = &so->variant[variant].info;
+    ctx->f = &so->variant[variant].f;
+    ctx->tex_mag_switchover = so->variant[variant].tex_mag_switchover;
++   ctx->border = so->variant[variant].border;
+    ctx->info->max_reg = -1;
+ 
+    /* convert nir to internal representation */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index a060c33..430d4a0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -72,11 +72,23 @@ struct ir2_frag_linkage {
+    uint16_t flat_mask, color_mask;
+ };
+ 
++/* Xenos border colors are (0, 0, 0, 0) or (1, 1, 1, 1), and point sampling
++ * never reads the border: fragment shader variants emulate it per sampler
++ * (ir2_shader_variant.border), the color at IR2_BORDER_CONST + sampler */
++#define IR2_BORDER_CONST 224
++#define IR2_BORDER_AXES    0x07 /* s, t, r wrap to the border */
++#define IR2_BORDER_MIRROR  0x08 /* ... mirrored once (|coord| > 1 is outside) */
++#define IR2_BORDER_NEAREST 0x10 /* select the color outside [0, 1] */
++#define IR2_BORDER_LINEAR  0x20 /* fetch again with the white border from
++                                 * IR2_BORDER_DUP_SLOT(k), k in the low bits */
++#define IR2_BORDER_DUP_SLOT(k) (31 - (k))
++
+ struct ir2_shader_variant {
+    struct ir2_shader_info info;
+    struct ir2_frag_linkage f;
+    bool binning;
+    uint16_t tex_mag_switchover;
++   uint8_t border[12]; /* fragment: IR2_BORDER_* per sampler */
+ };
+ 
+ struct fd2_shader_stateobj;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index e0a0c1b..e2b3ef3 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -169,6 +169,70 @@ ir2_lower_tex_round(nir_builder *b, nir_tex_instr *tex, void *data)
+    return true;
+ }
+ 
++/* border colors the hardware can't give (see IR2_BORDER_CONST): with point
++ * sampling, the color wherever a coordinate on a border axis is outside
++ * [0, 1] (mirrored once: |coord| > 1) */
++static bool
++ir2_lower_border(nir_builder *b, nir_tex_instr *tex, void *data)
++{
++   const uint8_t *border = data;
++
++   if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
++        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
++       tex->sampler_index >= 12 ||
++       !(border[tex->sampler_index] & (IR2_BORDER_NEAREST | IR2_BORDER_LINEAR)) ||
++       nir_tex_instr_src_index(tex, nir_tex_src_comparator) >= 0 ||
++       tex->is_array || tex->sampler_dim == GLSL_SAMPLER_DIM_RECT ||
++       tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
++      return false;
++
++   int c = nir_tex_instr_src_index(tex, nir_tex_src_coord);
++   if (c < 0)
++      return false;
++
++   uint8_t key = border[tex->sampler_index];
++   nir_def *coord = tex->src[c].src.ssa;
++   b->cursor = nir_after_instr(&tex->instr);
++
++   if (key & IR2_BORDER_LINEAR) {
++      /* this fetch has the black border, (0, 0, 0, 0), and a copy with the
++       * white one: per channel their difference is the border's filter
++       * weight (0 for a channel the format fixes), so
++       * black + (white - black) * color is the color's blend, exact for any
++       * filter and level */
++      unsigned sampler = tex->sampler_index;
++      nir_tex_instr *white = nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
++      white->sampler_index = white->texture_index = IR2_BORDER_DUP_SLOT(key & 0x7);
++      nir_builder_instr_insert(b, &white->instr);
++      nir_def *color = nir_load_uniform(b, 4, 32, nir_imm_int(b, 0),
++                                        .base = IR2_BORDER_CONST + sampler);
++      color = nir_trim_vector(b, color, tex->def.num_components);
++      nir_def *w = nir_fsub(b, &white->def, &tex->def);
++      nir_def *res = nir_fadd(b, nir_fmul(b, w, color), &tex->def);
++      nir_def_rewrite_uses_after(&tex->def, res);
++      return true;
++   }
++
++   nir_def *outside = nir_imm_false(b);
++   for (unsigned i = 0; i < coord->num_components && i < 3; i++) {
++      if (!(key & (1 << i)))
++         continue;
++      nir_def *x = nir_channel(b, coord, i);
++      if (key & IR2_BORDER_MIRROR)
++         x = nir_fabs(b, x);
++      outside = nir_ior(b, outside, nir_fgt_imm(b, x, 1.0f));
++      if (!(key & IR2_BORDER_MIRROR))
++         outside = nir_ior(b, outside, nir_flt_imm(b, x, 0.0f));
++   }
++
++   nir_def *color = nir_load_uniform(b, 4, 32, nir_imm_int(b, 0),
++                                     .base = IR2_BORDER_CONST + tex->sampler_index);
++   color = nir_trim_vector(b, color, tex->def.num_components);
++   nir_def *res = nir_bcsel(b, outside, color, &tex->def);
++   nir_def_rewrite_uses_after(&tex->def, res);
++   return true;
++}
++
+ /* Xenos: the sprite coordinate's y grows towards GL's +y; st expects the
+  * upper-left origin (lower_wpos_pntc), so use 1 - y */
+ static bool
+@@ -1666,6 +1730,15 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+ 
+    ctx->nir = nir_shader_clone(NULL, so->nir);
+ 
++   if (so->type == MESA_SHADER_FRAGMENT && ctx->border) {
++      bool any = false;
++      for (unsigned i = 0; i < 12; i++)
++         any |= ctx->border[i] != 0;
++      if (any)
++         OPT_V(ctx->nir, nir_shader_tex_pass, ir2_lower_border,
++               nir_metadata_control_flow, (void *)ctx->border);
++   }
++
+    if (ctx->tex_mag_switchover) {
+       OPT_V(ctx->nir, nir_lower_tex,
+             &(struct nir_lower_tex_options){
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index abf251f..30af96f 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -163,6 +163,7 @@ struct ir2_context {
+    struct ir2_shader_info *info;
+    struct ir2_frag_linkage *f;
+    uint16_t tex_mag_switchover;
++   const uint8_t *border;
+ 
+    int prev_export;
+    bool color_exported;   /* fragment shader wrote its color output */
+-- 
+2.53.0
+
