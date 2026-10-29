@@ -198,6 +198,10 @@ A sequencer runs 64 pixels (or vertices) together, and a predicated control-flow
 
 An exec control-flow instruction's address field is 12 bits on Xenos (Xenia's `ucode.h`); Adreno 200's layout, which freedreno's `instr-a2xx.h` followed, has 9 bits and three reserved. A shader with more than 512 ALU/fetch instructions wrapped the address (dEQP `uniform_api.random.3`). Jump addresses are 13 bits in both.
 
+### 39. Resolves always write the tiled layout
+
+`RB_COPY_DEST_INFO.LINEAR` (bit 3 in freedreno's a2xx register file) has no visible effect on Xenos: a resolve into a linear surface writes the tiled layout, so a linear destination reads back as garbage (piglit `fbo-3d` with 3D render targets enabled, 2026-10-29). Render targets are therefore tiled; X window buffers only look linear because the kernel converts them for scanout. 3D textures, which are linear, can't be rendered to directly; that would take a tiled 2D temporary and a detiling copy into the slice.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
