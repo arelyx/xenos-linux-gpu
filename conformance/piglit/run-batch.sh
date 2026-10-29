@@ -6,7 +6,9 @@
 # move, or the GPU is marked hung, is recorded as "hang" and the batch stops there.
 bf=$1; rf=$2; tmo=$3
 P=/sys/module/xegpu/parameters
-export PIGLIT_PLATFORM=gbm PIGLIT_SOURCE_DIR=/usr/lib/powerpc64-linux-gnu/piglit LD_LIBRARY_PATH=/opt/mesa-xenos/lib
+# EGL_PLATFORM: tests that call eglGetDisplay(EGL_DEFAULT_DISPLAY) have no X here
+# (glsl-bug-110796 failed eglInitialize instead of skipping), as in Mesa CI
+export EGL_PLATFORM=surfaceless PIGLIT_PLATFORM=gbm PIGLIT_SOURCE_DIR=/usr/lib/powerpc64-linux-gnu/piglit LD_LIBRARY_PATH=/opt/mesa-xenos/lib
 export PATH=/usr/lib/powerpc64-linux-gnu/piglit/bin:$PATH
 cd /usr/lib/powerpc64-linux-gnu/piglit
 state() { echo "$(cat $P/fence_timeouts) $(cat $P/fence_stalls) $(cat $P/gpu_hung)"; }

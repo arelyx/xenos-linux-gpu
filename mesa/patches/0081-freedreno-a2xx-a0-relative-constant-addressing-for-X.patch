@@ -1,0 +1,325 @@
+From e3c4be0ee976cac29117990616bc6a6ee28cbab5 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 13:17:14 -0700
+Subject: [PATCH] freedreno/a2xx: a0-relative constant addressing for Xenos
+ vertex shaders
+
+Xenos vertex shaders can index constants with the address register:
+MOVAs sets a0 = floor(x + 0.5), and a constant operand with its
+const_N_rel_abs bit (plus relative_addr for a0 rather than aL) reads
+c[n + a0]. Enable indirect_const_addr for Xenos vertex shaders and
+emit MOVAs + a relative read for load_uniform with a non-constant
+offset, instead of the if/else tree over the whole array.
+
+Ordering: each relative read depends on its MOVA, and each MOVA comes
+after the previous relative read, so no other MOVA lands in between.
+Relative reads are never co-issued (the relative bits are shared by
+all constant operands of an ALU instruction, a scalar constant
+included), cp_src does not fold them into users, and the scalar-mov
+insertion path skips their slots. Pixel shaders keep the lowering.
+
+The disassembler prints REL(...) on relative operands and shows MOVAs
+without a destination.
+
+piglit vp-address-01 passes on this path; dEQP 17063/17075, no
+regressions.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/freedreno/ir2/disasm-a2xx.c               |  9 ++++++-
+ src/gallium/drivers/freedreno/a2xx/ir2.c      | 26 +++++++++++++++++++
+ .../drivers/freedreno/a2xx/ir2_assemble.c     | 24 +++++++++++++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_cp.c   |  4 +++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 25 ++++++++++++++++--
+ .../drivers/freedreno/a2xx/ir2_private.h      | 10 ++++++-
+ src/gallium/drivers/freedreno/a2xx/ir2_ra.c   |  3 +++
+ .../drivers/freedreno/freedreno_screen.c      |  9 ++++---
+ 8 files changed, 103 insertions(+), 7 deletions(-)
+
+diff --git a/src/freedreno/ir2/disasm-a2xx.c b/src/freedreno/ir2/disasm-a2xx.c
+index ebd439a..4454dc6 100644
+--- a/src/freedreno/ir2/disasm-a2xx.c
++++ b/src/freedreno/ir2/disasm-a2xx.c
+@@ -251,12 +251,19 @@ disasm_alu(const uint32_t *dwords, uint32_t alu_off, int level, int sync,
+    if (alu->vector_clamp)
+       printf(" CLAMP");
+ 
++   /* a0/aL-relative constant operands */
++   if (alu->const_0_rel_abs || alu->const_1_rel_abs)
++      printf(" REL(%s%s%s)", alu->const_0_rel_abs ? "c0" : "",
++             alu->const_1_rel_abs ? "c1" : "",
++             alu->relative_addr ? ",a0" : ",aL");
++
+    if (alu->export_data)
+       print_export_comment(alu->vector_dest, type);
+ 
+    printf("\n");
+ 
+-   if (alu->scalar_write_mask || !alu->vector_write_mask) {
++   if (alu->scalar_write_mask || !alu->vector_write_mask ||
++       alu->scalar_opc == MOVAs || alu->scalar_opc == MOVA_FLOORs) {
+       /* 2nd optional scalar op: */
+ 
+       printf("%s", levels[level]);
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 85c8e3f..98f1ca6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -23,12 +23,26 @@ scalar_possible(struct ir2_instr *instr)
+    return src_ncomp(instr) == 1;
+ }
+ 
++static bool
++has_rel_src(struct ir2_instr *instr)
++{
++   for (unsigned i = 0; i < instr->src_count; i++)
++      if (instr->src[i].type == IR2_SRC_CONST && instr->src[i].rel)
++         return true;
++   return false;
++}
++
+ static bool
+ is_alu_compatible(struct ir2_instr *a, struct ir2_instr *b)
+ {
+    if (!a)
+       return true;
+ 
++   /* an a0-relative constant read is issued alone: the relative bits are
++    * shared by all constant operands of the ALU instruction */
++   if (has_rel_src(a) || has_rel_src(b))
++      return false;
++
+    /* dont use same instruction twice */
+    if (a == b)
+       return false;
+@@ -122,6 +136,10 @@ insert(struct ir2_context *ctx, unsigned block_idx, unsigned reg_idx,
+       if (s->instr->type != IR2_ALU || s->instr->alu.export >= 0)
+          continue;
+ 
++      /* a constant scalar operand would take the a0 offset too */
++      if (has_rel_src(s->instr))
++         continue;
++
+       sched = s;
+    }
+    *comp = ffs(mask) - 1;
+@@ -181,6 +199,7 @@ scalarize_case1(struct ir2_context *ctx, struct ir2_instr *instr, bool order)
+ 
+    assert(ctx->instr_count < IR2_MAX_INSTR);
+    ins = &ctx->instr[idx = ctx->instr_count++];
++   ins->dep = ins->after = -1;
+    ins->idx = idx;
+    ins->type = IR2_ALU;
+    ins->src[0] = src1;
+@@ -275,6 +294,12 @@ sched_next(struct ir2_context *ctx, struct ir2_sched_instr *sched)
+       /* don't reorder across predicates */
+       if (avail_count && instr->pred != avail[0]->pred)
+          is_ok = false;
++      /* a0: a relative read after its MOVA, a MOVA after the previous
++       * relative read */
++      if (instr->dep >= 0 && ctx->instr[instr->dep].need_emit)
++         is_ok = false;
++      if (instr->after >= 0 && ctx->instr[instr->after].need_emit)
++         is_ok = false;
+ 
+       if (!is_ok)
+          continue;
+@@ -417,6 +442,7 @@ schedule_instrs(struct ir2_context *ctx)
+          /* generate the SET_LOD instruction */
+          assert(ctx->instr_count < IR2_MAX_INSTR);
+          tex_lod = &ctx->instr[ctx->instr_count++];
++         tex_lod->dep = tex_lod->after = -1;
+          tex_lod->type = IR2_FETCH;
+          tex_lod->block_idx = instr->block_idx;
+          tex_lod->pred = instr->pred;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+index 7595262..1511d92 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_assemble.c
+@@ -306,6 +306,24 @@ fill_instr(struct ir2_context *ctx, struct ir2_sched_instr *sched, instr_t *bc,
+       }
+ 
+       bc->alu.pred_select = instr_v->pred;
++
++      /* a0-relative constants: the first constant operand takes its mode
++       * from const_0_rel_abs, later ones from const_1_rel_abs (Xenia
++       * ucode.h src_const_is_addressed) */
++      struct ir2_src *vsrc[3] = {&src1, &src2, src3};
++      unsigned nconst = 0;
++      for (unsigned i = 0; i < 3 && vsrc[i]; i++) {
++         if (vsrc[i]->type != IR2_SRC_CONST)
++            continue;
++         if (vsrc[i]->rel) {
++            if (nconst)
++               bc->alu.const_1_rel_abs = 1;
++            else
++               bc->alu.const_0_rel_abs = 1;
++            bc->alu.relative_addr = 1;
++         }
++         nconst++;
++      }
+    }
+ 
+    if (instr_s) {
+@@ -336,6 +354,12 @@ fill_instr(struct ir2_context *ctx, struct ir2_sched_instr *sched, instr_t *bc,
+       if (instr_v)
+          assert(instr_s->pred == instr_v->pred);
+       bc->alu.pred_select = instr_s->pred;
++
++      if (src->type == IR2_SRC_CONST && src->rel) {
++         assert(!instr_v); /* issued alone, see is_alu_compatible */
++         bc->alu.const_0_rel_abs = 1;
++         bc->alu.relative_addr = 1;
++      }
+    }
+ 
+    *is_fetch = false;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+index ff2fc3e..51d7671 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+@@ -62,6 +62,10 @@ cp_src(struct ir2_context *ctx)
+             if (p->alu.saturate)
+                break;
+ 
++            /* an a0-relative read must stay right after its MOVA */
++            if (p->src[0].type == IR2_SRC_CONST && p->src[0].rel)
++               break;
++
+             /* cant apply abs to const src, const src only for alu */
+             if (p->src[0].type == IR2_SRC_CONST &&
+                 (src->abs || instr->type != IR2_ALU))
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index b367085..f5994dc 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -439,6 +439,7 @@ ir2_instr_create(struct ir2_context *ctx, int type)
+    instr->block_idx = ctx->block_idx;
+    instr->pred = ctx->pred;
+    instr->is_ssa = true;
++   instr->dep = instr->after = -1;
+    /* give every result a live range (internal instructions - predicates,
+     * kills - left block_idx_free at 0 and held their register to the end of
+     * the shader: 30 of the 64 in dEQP uniform_api.random.3) */
+@@ -813,11 +814,30 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+       break;
+    case nir_intrinsic_load_uniform:
+       const_offset = nir_src_as_const_value(intr->src[0]);
+-      assert(const_offset); /* TODO can be false in ES2? */
+       idx = nir_intrinsic_base(intr);
+-      idx += (uint32_t)const_offset[0].f32;
++      if (const_offset) {
++         idx += (uint32_t)const_offset[0].f32;
++         instr = instr_create_alu_dest(ctx, nir_op_mov, &intr->def);
++         instr->src[0] = ir2_src(idx, 0, IR2_SRC_CONST);
++         break;
++      }
++      /* Xenos vertex shaders (indirect_const_addr): MOVAs sets
++       * a0 = floor(offset + 0.5), then the constant operand reads
++       * c[base + a0]. The scheduler keeps each MOVA between the previous
++       * relative read and its own. */
++      assert(ctx->so->is_xenos && ctx->so->type == MESA_SHADER_VERTEX);
++      struct ir2_instr *mova = ir2_instr_create(ctx, IR2_ALU);
++      mova->alu.vector_opc = VECTOR_NONE;
++      mova->alu.scalar_opc = MOVAs;
++      mova->alu.export = -1;
++      mova->src_count = 1;
++      mova->src[0] = make_src(ctx, intr->src[0]);
++      mova->after = ctx->last_rel;
+       instr = instr_create_alu_dest(ctx, nir_op_mov, &intr->def);
+       instr->src[0] = ir2_src(idx, 0, IR2_SRC_CONST);
++      instr->src[0].rel = 1;
++      instr->dep = mova->idx;
++      ctx->last_rel = instr->idx;
+       break;
+    case nir_intrinsic_terminate:
+    case nir_intrinsic_terminate_if:
+@@ -1641,6 +1661,7 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+    struct fd2_shader_stateobj *so = ctx->so;
+ 
+    memset(ctx->ssa_map, 0xff, sizeof(ctx->ssa_map));
++   ctx->last_rel = -1;
+ 
+    ctx->nir = nir_shader_clone(NULL, so->nir);
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index a003edd..abf251f 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -35,7 +35,8 @@ struct ir2_src {
+    enum ir2_src_type type : 2;
+    uint8_t abs : 1;
+    uint8_t negate : 1;
+-   uint8_t : 4;
++   uint8_t rel : 1; /* const: index + a0 (Xenos vertex shaders) */
++   uint8_t : 3;
+ };
+ 
+ struct ir2_reg_component {
+@@ -74,6 +75,11 @@ struct ir2_instr {
+    /* predicate value - (usually) same for entire block */
+    uint8_t pred : 2;
+ 
++   /* a0 ordering (indirect constants): dep is the MOVA a relative read
++    * needs (emitted with it), after is the previous relative read a MOVA
++    * must follow (ordering only). -1 = none */
++   int dep, after;
++
+    /* src */
+    uint8_t src_count;
+    struct ir2_src src[4];
+@@ -149,6 +155,7 @@ struct ir2_context {
+    /* ssa index of position output */
+    struct ir2_src position;
+    bool position_written;
++   int last_rel; /* last a0-relative read, for MOVA ordering */
+ 
+    /* to translate SSA ids to instruction ids */
+    int16_t ssa_map[4096];
+@@ -393,6 +400,7 @@ src_ncomp(struct ir2_instr *instr)
+ 
+    switch (instr->alu.scalar_opc) {
+    case PRED_SETEs ... KILLONEs:
++   case MOVAs: /* no dest, one source component */
+       return 1;
+    default:
+       break;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+index 87fbb92..00c2c51 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+@@ -52,6 +52,9 @@ set_need_emit(struct ir2_context *ctx, struct ir2_instr *instr)
+ 
+    instr->need_emit = true;
+ 
++   if (instr->dep >= 0)
++      set_need_emit(ctx, &ctx->instr[instr->dep]);
++
+    ir2_foreach_src (src, instr) {
+       switch (src->type) {
+       case IR2_SRC_SSA:
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 11cf497..ba15800 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -282,9 +282,12 @@ fd_init_shader_caps(struct fd_screen *screen)
+ 
+       caps->cont_supported = true;
+ 
+-      /* a2xx compiler doesn't handle indirect: */
+-      caps->indirect_temp_addr =
+-      caps->indirect_const_addr = is_ir3(screen);
++      /* a2xx compiler doesn't handle indirect temps: */
++      caps->indirect_temp_addr = is_ir3(screen);
++      /* Xenos vertex shaders index constants with a0 (MOVAs); pixel
++       * shaders keep the if/else lowering (D3D9 ps_3_0 had no a0) */
++      caps->indirect_const_addr = is_ir3(screen) ||
++         (is_xenos(screen) && i == MESA_SHADER_VERTEX);
+ 
+       caps->tgsi_sqrt_supported = true;
+ 
+-- 
+2.53.0
+
