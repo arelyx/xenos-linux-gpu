@@ -119,7 +119,14 @@ Ring to IB to IB works. A third level wedges the GPU (libxenon's cube replayed w
 
 ### 21. No working software reset (yet)
 
-libxenon never implemented a GPU reset, and the RBBM soft-reset sequence we tried hung the whole console. So, for this project, a wedged GPU needed a power cycle and everything was planned around that. This is a gap in what we know, not a documented hardware limit: Microsoft's own software presumably recovers the GPU, and people familiar with the hardware think a reset is possible.
+libxenon never implemented a GPU reset. What we measured (`xegpu` `reset_probe` parameter: halt the ME, pulse `RBBM_SOFT_RESET` (0x003c) with a mask, reprogram the ring, CP init; per-bit results in `conformance/results/rbbm-soft-reset-map-2026-10-29.txt`):
+
+- Bit 0 (CP) is safe and recovers a stuck command processor (status `80050110` back to idle, CP init succeeds, rendering correct). Every CP init already uses it.
+- Bit 8 takes the console down (probably the bus interface), which is why writing all ones hung it.
+- Every other bit is individually safe. Bit 5 clears the MH and one SQ busy flag, bit 15 clears PA; all of them together (`0xfffffeff`) still leave RB, SX and MH busy on a GPU wedged by a runaway fragment shader (`gltest/glloop.c`), and CP init times out. A real wedge still needs a power cycle.
+- Reloading `xegpu` (rmmod/modprobe plus `xeinit`) without a power cycle leaves rendering broken (all-zero pixels), so recovery has to happen in place, not by reloading the module.
+
+This is a gap in what we know, not a documented hardware limit: Microsoft's own software presumably recovers the GPU, and people familiar with the hardware think a reset is possible.
 
 ### 22. MMIO only with aligned 32-bit accesses
 

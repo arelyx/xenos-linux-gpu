@@ -906,3 +906,50 @@ module_init(xegpu_init);
 module_exit(xegpu_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Development user-space access to the Xenos GPU");
+
+/* /sys/module/xegpu/parameters/reset_probe: write a RBBM_SOFT_RESET mask to
+ * halt the CP, pulse the reset with that mask, and bring the CP back up.
+ * Probing which blocks can be reset without taking the bus down (all ones hung
+ * the console, 25 Oct 2026; bit 0 alone is part of every CP init) and whether
+ * that recovers a wedged GPU. Run with no GL clients. */
+static u32 reset_probe_last;
+static int reset_probe_set(const char *val, const struct kernel_param *kp)
+{
+	u32 mask, before, after;
+	int rc;
+
+	rc = kstrtou32(val, 0, &mask);
+	if (rc)
+		return rc;
+	mutex_lock(&cp_lock);
+	before = rr(0x1740);
+	pr_info("xegpu: reset_probe %08x: RBBM_STATUS before %08x\n", mask, before);
+	wr(0x07d8, 0x1000FFFF);   /* halt ME */
+	udelay(1000);
+	wr(0x00f0, mask);
+	(void)rr(0x00f0);
+	udelay(2000);
+	wr(0x00f0, 0);
+	(void)rr(0x00f0);
+	udelay(2000);
+	/* as cp_init_locked's own CP reset: ring registers again, then idle */
+	cp_setup_ring();
+	udelay(2000);
+	after = rr(0x1740);
+	pr_info("xegpu: reset_probe %08x: RBBM_STATUS after %08x, idle wait %d\n", mask, after,
+		wait_gui_idle("reset_probe"));
+	xe_fence_flush_all();
+	cp_ready = false;
+	gpu_hung = false;
+	rc = cp_init_locked();
+	mutex_unlock(&cp_lock);
+	reset_probe_last = mask;
+	pr_info("xegpu: reset_probe %08x: CP init %d, RBBM_STATUS %08x\n", mask, rc, rr(0x1740));
+	return 0;
+}
+static int reset_probe_get(char *buf, const struct kernel_param *kp)
+{
+	return sysfs_emit(buf, "%08x\n", reset_probe_last);
+}
+static const struct kernel_param_ops reset_probe_ops = { .set = reset_probe_set, .get = reset_probe_get };
+module_param_cb(reset_probe, &reset_probe_ops, NULL, 0644);
