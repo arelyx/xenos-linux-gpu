@@ -1,0 +1,334 @@
+From f3d9aa3727da4fd57deb5a8d06a3a81dcfecef26 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:14:15 -0700
+Subject: [PATCH] freedreno/a2xx, st/mesa: gl_ClipVertex on Xenos
+
+Xenos user clip planes (PA_CL_UCP_n) test the clip-space position, so a
+GLSL vertex shader's gl_ClipVertex was ignored.
+
+- New pipe cap clip_planes_lower_clip_vertex: the state tracker lowers
+  the user clip planes to clip distances, as it does without
+  clip_planes, for a vertex shader that writes gl_ClipVertex.
+- fd2: a vertex shader writing clip distances turns the hardware planes
+  off in PA_CL_CLIP_CNTL; fragment shader variants keyed on the plane
+  mask run nir_lower_clip_fs (discard on a negative distance). The
+  fragment variant is now picked before the vertex variant, which links
+  to its inputs.
+
+piglit clip-plane-transformation clipvert_pos and pos_clipvert pass.
+dEQP 17063/17075, no regressions; performance unchanged.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 12 ++-
+ .../drivers/freedreno/a2xx/fd2_program.c      | 96 +++++++++++--------
+ .../drivers/freedreno/a2xx/fd2_program.h      |  2 +
+ src/gallium/drivers/freedreno/a2xx/ir2.c      |  3 +-
+ src/gallium/drivers/freedreno/a2xx/ir2.h      |  1 +
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  |  5 +
+ .../drivers/freedreno/a2xx/ir2_private.h      |  1 +
+ .../drivers/freedreno/freedreno_screen.c      |  2 +
+ src/gallium/include/pipe/p_defines.h          |  4 +
+ src/mesa/state_tracker/st_atom_shader.c       |  5 +-
+ 10 files changed, 84 insertions(+), 47 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index d4fbe56..a40007e 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -399,12 +399,16 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+             OUT_RING(ring, fui(ctx->ucp.ucp[i][j]));
+    }
+ 
+-   if (ctx->rasterizer && dirty & FD_DIRTY_RASTERIZER) {
++   if (ctx->rasterizer && dirty & (FD_DIRTY_RASTERIZER | FD_DIRTY_PROG)) {
+       struct fd2_rasterizer_stateobj *rasterizer =
+          fd2_rasterizer_stateobj(ctx->rasterizer);
++      struct fd2_shader_stateobj *vs = ctx->prog.vs;
+       OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+       OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_CLIP_CNTL));
+-      OUT_RING(ring, rasterizer->pa_cl_clip_cntl);
++      /* the hardware planes test the position: not for a vertex shader
++       * that computes clip distances (gl_ClipVertex) */
++      OUT_RING(ring, vs && vs->writes_clip_dist ? (rasterizer->pa_cl_clip_cntl & ~0x3fu)
++                                                : rasterizer->pa_cl_clip_cntl);
+       OUT_RING(ring, rasterizer->pa_su_sc_mode_cntl |
+                         A2XX_PA_SU_SC_MODE_CNTL_VTX_WINDOW_OFFSET_ENABLE);
+ 
+@@ -505,8 +509,8 @@ fd2_emit_state(struct fd_context *ctx, const enum fd_dirty_3d_state dirty)
+        !debug_get_option_xenos_interp()) {
+       struct fd2_shader_stateobj *fp = ctx->prog.fs;
+       struct pipe_rasterizer_state *rast = ctx->rasterizer;
+-      uint32_t flat = fp->variant[0].f.flat_mask |
+-                      (rast && rast->flatshade ? fp->variant[0].f.color_mask : 0);
++      uint32_t flat = fp->variant[fp->cur_variant].f.flat_mask |
++                      (rast && rast->flatshade ? fp->variant[fp->cur_variant].f.color_mask : 0);
+       OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+       OUT_RING(ring, CP_REG(REG_A2XX_SQ_INTERPOLATOR_CNTL));
+       OUT_RING(ring, 0xffffffff & ~flat);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index bfa99b9..bc9a4a0 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -150,10 +150,14 @@ fd2_shader_state_create(struct pipe_context *pctx,
+ 
+    ir2_compile(so, 0, NULL);
+ 
+-   /* Free FS NIR now, unless border emulation may need variants of it
+-    * (Xenos); VS NIR will need to stick around for the draw variant later.
++   /* Free FS NIR now, unless border emulation or clip distances may need
++    * variants of it (Xenos); VS NIR will need to stick around for the draw
++    * variant later.
+     */
+-   if (so->nir->info.stage == MESA_SHADER_FRAGMENT && !(so->is_xenos && so->tex_samplers)) {
++   if (so->type == MESA_SHADER_VERTEX)
++      so->writes_clip_dist = !!(so->nir->info.outputs_written &
++                                (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1));
++   if (so->nir->info.stage == MESA_SHADER_FRAGMENT && !so->is_xenos) {
+       ralloc_free(so->nir);
+       so->nir = NULL;
+    }
+@@ -315,56 +319,28 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+    if (!binning)
+       fp = prog->fs;
+ 
+-   switchover = tex_mag_switchover(ctx, vp);
+-
+-   /* find variant matching the linked fragment shader */
+-   for (variant = 0; variant < ARRAY_SIZE(vp->variant); variant++) {
+-      struct ir2_shader_variant *v = &vp->variant[variant];
+-
+-      /* if checked all variants, compile a new variant */
+-      if (!v->info.sizedwords) {
+-         v->tex_mag_switchover = switchover;
+-         ir2_compile(vp, variant, fp);
+-         break;
+-      }
+-
+-      if (v->binning != binning || v->tex_mag_switchover != switchover)
+-         continue;
+-
+-      /* check if fragment shader linkage matches */
+-      if (binning ||
+-          !memcmp(&v->f, &fp->variant[0].f, sizeof(struct ir2_frag_linkage)))
+-         break;
+-   }
+-
+-   /* keying on the sampler filters as well as the fragment linkage means the
+-    * variants can run out, so recompile over the last one rather than walk
+-    * off the end of the array
+-    */
+-   if (variant == ARRAY_SIZE(vp->variant)) {
+-      variant--;
+-      free(vp->variant[variant].info.dwords);
+-      memset(&vp->variant[variant], 0, sizeof(vp->variant[variant]));
+-      vp->variant[variant].tex_mag_switchover = switchover;
+-      ir2_compile(vp, variant, fp);
+-   }
+-
+-   vpi = &vp->variant[variant].info;
+    if (fp) {
+-      /* fragment variant for the samplers' border emulation (variant 0 has
+-       * none) */
++      /* fragment variant for the samplers' border emulation and clip
++       * distances (variant 0 has neither), picked before the vertex variant,
++       * which links to it */
+       unsigned fv = 0;
+       uint8_t key[12] = {0};
++      /* user clip planes the vertex shader turned into clip distances */
++      uint8_t ucp = vp->writes_clip_dist && ctx->rasterizer ?
++                    ctx->rasterizer->clip_plane_enable : 0;
+       if (fp->nir && fp->is_xenos)
+          fd2_border_key(ctx, fp, key);
++      if (!fp->nir)
++         ucp = 0;
+       for (fv = 0; fv < ARRAY_SIZE(fp->variant); fv++) {
+          struct ir2_shader_variant *v = &fp->variant[fv];
+          if (!v->info.sizedwords) {
+             memcpy(v->border, key, sizeof(key));
++            v->ucp = ucp;
+             ir2_compile(fp, fv, NULL);
+             break;
+          }
+-         if (!memcmp(v->border, key, sizeof(key)))
++         if (!memcmp(v->border, key, sizeof(key)) && v->ucp == ucp)
+             break;
+       }
+       if (fv == ARRAY_SIZE(fp->variant)) {
+@@ -372,8 +348,10 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+          free(fp->variant[fv].info.dwords);
+          memset(&fp->variant[fv], 0, sizeof(fp->variant[fv]));
+          memcpy(fp->variant[fv].border, key, sizeof(key));
++         fp->variant[fv].ucp = ucp;
+          ir2_compile(fp, fv, NULL);
+       }
++      fp->cur_variant = fv;
+       fpi = &fp->variant[fv].info;
+       f = &fp->variant[fv].f;
+ 
+@@ -395,6 +373,42 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+       f = NULL;
+    }
+ 
++   switchover = tex_mag_switchover(ctx, vp);
++
++   /* find variant matching the linked fragment shader */
++   for (variant = 0; variant < ARRAY_SIZE(vp->variant); variant++) {
++      struct ir2_shader_variant *v = &vp->variant[variant];
++
++      /* if checked all variants, compile a new variant */
++      if (!v->info.sizedwords) {
++         v->tex_mag_switchover = switchover;
++         ir2_compile(vp, variant, fp);
++         break;
++      }
++
++      if (v->binning != binning || v->tex_mag_switchover != switchover)
++         continue;
++
++      /* check if fragment shader linkage matches */
++      if (binning ||
++          !memcmp(&v->f, &fp->variant[fp->cur_variant].f, sizeof(struct ir2_frag_linkage)))
++         break;
++   }
++
++   /* keying on the sampler filters as well as the fragment linkage means the
++    * variants can run out, so recompile over the last one rather than walk
++    * off the end of the array
++    */
++   if (variant == ARRAY_SIZE(vp->variant)) {
++      variant--;
++      free(vp->variant[variant].info.dwords);
++      memset(&vp->variant[variant], 0, sizeof(vp->variant[variant]));
++      vp->variant[variant].tex_mag_switchover = switchover;
++      ir2_compile(vp, variant, fp);
++   }
++
++   vpi = &vp->variant[variant].info;
++
+    /* clear/gmem2mem/mem2gmem need to be changed to remove this condition */
+    if (prog != &ctx->solid_prog && prog != &ctx->solid_z_prog &&
+        prog != &ctx->blit_prog[0] && prog != &ctx->blit_z) {
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.h b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+index 498c858..e00e768 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.h
+@@ -33,6 +33,8 @@ struct fd2_shader_stateobj {
+    } immediates[128];   /* 64 overflowed: dEQP uniform_api.random.3 */
+ 
+    bool writes_psize;
++   bool writes_clip_dist; /* vertex: st lowered the user clip planes */
++   unsigned cur_variant;  /* fragment: the variant fd2_program_emit picked */
+    bool need_param;
+    bool has_kill;
+    bool writes_depth;   /* fragment shader exports depth (oDepth, export 61) */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index eab8f93..ba0e0b6 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -484,7 +484,7 @@ ir2_compile(struct fd2_shader_stateobj *so, unsigned variant,
+    bool binning = !fp && so->type == MESA_SHADER_VERTEX;
+ 
+    if (fp)
+-      so->variant[variant].f = fp->variant[0].f;
++      so->variant[variant].f = fp->variant[fp->cur_variant].f;
+    so->variant[variant].binning = binning;
+ 
+    ctx->so = so;
+@@ -492,6 +492,7 @@ ir2_compile(struct fd2_shader_stateobj *so, unsigned variant,
+    ctx->f = &so->variant[variant].f;
+    ctx->tex_mag_switchover = so->variant[variant].tex_mag_switchover;
+    ctx->border = so->variant[variant].border;
++   ctx->ucp = so->variant[variant].ucp;
+    ctx->info->max_reg = -1;
+ 
+    /* convert nir to internal representation */
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index 430d4a0..f7edcc4 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -89,6 +89,7 @@ struct ir2_shader_variant {
+    bool binning;
+    uint16_t tex_mag_switchover;
+    uint8_t border[12]; /* fragment: IR2_BORDER_* per sampler */
++   uint8_t ucp;        /* fragment: discard on these clip distances */
+ };
+ 
+ struct fd2_shader_stateobj;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index e2b3ef3..ecd3d9b 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -1730,6 +1730,11 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+ 
+    ctx->nir = nir_shader_clone(NULL, so->nir);
+ 
++   /* gl_ClipVertex: st computed the clip distances in the vertex shader
++    * (clip_planes_lower_clip_vertex); discard where one is negative */
++   if (so->type == MESA_SHADER_FRAGMENT && ctx->ucp)
++      OPT_V(ctx->nir, nir_lower_clip_fs, ctx->ucp, false, true);
++
+    if (so->type == MESA_SHADER_FRAGMENT && ctx->border) {
+       bool any = false;
+       for (unsigned i = 0; i < 12; i++)
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 30af96f..01ac28c 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -164,6 +164,7 @@ struct ir2_context {
+    struct ir2_frag_linkage *f;
+    uint16_t tex_mag_switchover;
+    const uint8_t *border;
++   uint8_t ucp;
+ 
+    int prev_export;
+    bool color_exported;   /* fragment shader wrote its color output */
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 31d719c..0545791 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -653,6 +653,8 @@ fd_init_screen_caps(struct fd_screen *screen)
+    if (is_xenos(screen))
+       caps->point_size_fixed = PIPE_POINT_SIZE_LOWER_ALWAYS;
+ 
++   caps->clip_planes_lower_clip_vertex = is_xenos(screen);
++
+    caps->clip_planes =
+       /* Gens that support GS, have GS lowered into a quasi-VS which confuses
+        * the frontend clip-plane lowering.  So we handle this in the backend
+diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
+index 79e68b8..9d33e4a 100644
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -1187,6 +1187,10 @@ struct pipe_caps {
+    uint64_t ignored_output_varyings[MESA_SHADER_MESH_STAGES];
+    unsigned dmabuf;
+    unsigned clip_planes;
++   /* hardware clip planes test the position only: lower the user clip
++    * planes (as without clip_planes) for a vertex shader writing
++    * gl_ClipVertex */
++   bool clip_planes_lower_clip_vertex;
+    unsigned max_vertex_buffers;
+    unsigned gl_begin_end_buffer_size;
+    unsigned glsl_zero_init;
+diff --git a/src/mesa/state_tracker/st_atom_shader.c b/src/mesa/state_tracker/st_atom_shader.c
+index 8d1e7ce..fd6c0df 100644
+--- a/src/mesa/state_tracker/st_atom_shader.c
++++ b/src/mesa/state_tracker/st_atom_shader.c
+@@ -324,7 +324,10 @@ st_update_vp( struct st_context *st )
+          if (st->lower_point_size)
+             key.export_point_size = !st->ctx->VertexProgram.PointSizeEnabled && !st->ctx->PointSizeIsSet;
+          /* _NEW_TRANSFORM */
+-         if (!st->screen->caps.clip_planes && st_user_clip_planes_enabled(st->ctx))
++         if ((!st->screen->caps.clip_planes ||
++              (st->screen->caps.clip_planes_lower_clip_vertex &&
++               (vp->info.outputs_written & VARYING_BIT_CLIP_VERTEX))) &&
++             st_user_clip_planes_enabled(st->ctx))
+             key.lower_ucp = st->ctx->Transform.ClipPlanesEnabled;
+       }
+ 
+-- 
+2.53.0
+
