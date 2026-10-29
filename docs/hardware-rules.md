@@ -202,6 +202,10 @@ An exec control-flow instruction's address field is 12 bits on Xenos (Xenia's `u
 
 `RB_COPY_DEST_INFO.LINEAR` (bit 3 in freedreno's a2xx register file) has no visible effect on Xenos: a resolve into a linear surface writes the tiled layout, so a linear destination reads back as garbage (piglit `fbo-3d` with 3D render targets enabled, 2026-10-29). Render targets are therefore tiled; X window buffers only look linear because the kernel converts them for scanout. 3D textures, which are linear, can't be rendered to directly; that would take a tiled 2D temporary and a detiling copy into the slice.
 
+### 40. Constant addressing with a0 works in vertex shaders only
+
+`MOVAs` sets `a0 = floor(x + 0.5)` (clamped to -256..255), and a constant operand whose `const_N_rel_abs` bit is set, with `relative_addr` selecting a0 instead of the loop counter aL, reads `c[n + a0]` (Xenia's `ucode.h`). In a vertex shader it works: piglit `vp-address-01` passes with offsets -2 to +2, and dEQP's dynamic uniform indexing in vertex shaders still passes with Mesa 0081, which uses it instead of an if/else tree. The first constant operand of an ALU instruction takes its mode from `const_0_rel_abs` and later ones, the co-issued scalar's included, from `const_1_rel_abs`, so a scalar `MAXs C0` paired with a relative vector read also read `C[0 + a0]` (dEQP `nested_struct_array_dynamic_index_vertex`). In a pixel shader the same code returns one fixed constant whatever a0 holds: `gltest/glfsidx` reads `u[i]` from eight uniforms and gets `u[7]` for every i, whether a0 comes from a constant or a register (2026-10-29). D3D9's ps_3_0 had no a0 either. Pixel shaders keep Mesa's if/else lowering.
+
 ## Formats
 
 - Texture fetch endian: 8in16 for packed 16-bit formats (565, 4444), 8in32 for 32-bit components, none for arrays of bytes (L8A8 is bytes; swapping it swapped L and A).
