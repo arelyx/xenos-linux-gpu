@@ -41,7 +41,7 @@ There's no integrity check on that file. Keep a backup. A Peer Pressure update o
 Linux 6.18.58 with Free60's xenon patch (`linux-kernel-xbox360`), built with the `xenon-` toolchain from Free60's libxenon container. Apply:
 
 - `kernel/patches/0001-sis190-tx-wake-race.patch`: without it the network dies the first time the TX ring fills (NFS root boot).
-- `kernel/patches/0002-xenon-altivec.patch`: advertise AltiVec, or every vector instruction gets SIGILL.
+- `kernel/patches/0002-xenon-vmx-not-advertised.patch`: enable VMX so code built with AltiVec (libLLVM) runs, without advertising AltiVec to run-time detection.
 
 Config notes: `CONFIG_XENOS_RB=m` (built in, it claims the GPU before the DRM driver). `coherent_pool=16M` on the command line.
 
