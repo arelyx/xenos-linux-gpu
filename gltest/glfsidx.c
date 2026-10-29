@@ -32,7 +32,7 @@ int main(int argc, char **argv)
 	                        " void main() { gl_Position = p; f = fi + 0.25; }"
 	                      : "attribute vec4 p; void main() { gl_Position = p; }";
 	const char *fs = vary ? "precision highp float; uniform vec4 u[8]; varying float f;"
-	                        " void main() { gl_FragColor = u[int(f)]; }"
+	                        " void main() { gl_FragColor = u[int(f)] + vec4(0.25); }"
 	                      : "precision highp float; uniform vec4 u[8]; uniform int i;"
 	                        " void main() { gl_FragColor = u[i]; }";
 	GLuint v = glCreateShader(GL_VERTEX_SHADER); glShaderSource(v, 1, &vs, NULL); glCompileShader(v);

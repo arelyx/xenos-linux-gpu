@@ -1,0 +1,226 @@
+From e70bc7513fab8aa926189f24c3f0d0b100740b6c Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 14:19:53 -0700
+Subject: [PATCH] freedreno/a2xx: a0-relative constants in Xenos pixel shaders
+ too
+
+Pixel shaders can read constants at a0 as well. Two things kept them
+from it:
+
+- An export's ALLOC loses a0 (found by xsdk, github.com/xenosworks/xsdk,
+  docs/HARDWARE.md, "a0 doesn't survive an alloc"). The scheduler no
+  longer issues an export between a MOVA and its relative read, and
+  cp_export no longer turns a relative read into an export.
+- fd2's constant split, vertex constants from 0x20 and pixel constants
+  from 0x120 (size 0xe0): relative reads in a pixel shader read nothing
+  at any index with it. Use the split libxenon and xsdk use, vertex
+  constants from 0 and pixel constants from 0x100, 256 each (the size
+  field is size - 1). VS_CONST_BASE/PS_CONST_BASE move to fd2_emit.h and
+  the clear-color constant writes use PS_CONST_BASE.
+
+indirect_const_addr is now set for both stages on Xenos. piglit
+glsl-uniform-interstage-limits subdivide 5 (and with statechanges)
+pass; they crashed out of registers on the if/else tree. dEQP
+17063/17075, no regressions; performance unchanged.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c    |  6 +++---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c    |  6 ++----
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.h    |  6 ++++++
+ src/gallium/drivers/freedreno/a2xx/fd2_program.c |  2 +-
+ src/gallium/drivers/freedreno/a2xx/ir2.c         | 11 +++++++++++
+ src/gallium/drivers/freedreno/a2xx/ir2.h         |  2 +-
+ src/gallium/drivers/freedreno/a2xx/ir2_cp.c      |  7 +++++++
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c     |  7 ++++---
+ src/gallium/drivers/freedreno/freedreno_screen.c |  6 ++----
+ 9 files changed, 37 insertions(+), 16 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 48b9b02..0bb6f82 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -464,7 +464,7 @@ clear_fast(struct fd_batch *batch, struct fd_ringbuffer *ring,
+ 
+       uint32_t cc[4] = { fui((float)(color_clear >> 0 & 0xff) * sc), fui((float)(color_clear >> 8 & 0xff) * sc),
+                          fui((float)(color_clear >> 16 & 0xff) * sc), fui((float)(color_clear >> 24 & 0xff) * sc) };
+-      fd2_emit_alu_consts(batch->ctx, ring, 0x480, cc, 4);
++      fd2_emit_alu_consts(batch->ctx, ring, PS_CONST_BASE * 4, cc, 4);
+ 
+       // XXX if using float the rounding error breaks it..
+       float depth = ((double)(depth_clear >> 8)) * (1.0 / (double)0xffffff);
+@@ -625,7 +625,7 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+    if (is_a20x(ctx->screen) || is_xenos(ctx->screen)) {
+       if (buffers & FD_BUFFER_COLOR) {
+          /* C0 used by fragment shader */
+-         fd2_emit_alu_consts(ctx, ring, 0x480, color->ui, 4);
++         fd2_emit_alu_consts(ctx, ring, PS_CONST_BASE * 4, color->ui, 4);
+       }
+ 
+       if (buffers & FD_BUFFER_DEPTH) {
+@@ -641,7 +641,7 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+          fd2_context(ctx)->clear_z_export = is_xenos(ctx->screen) && depth != 0.0 && depth != 1.0;
+          if (fd2_context(ctx)->clear_z_export) {
+             float z[4] = {depth, depth, depth, depth};
+-            fd2_emit_alu_consts(ctx, ring, 0x480 + 4, (const uint32_t *)z, 4);
++            fd2_emit_alu_consts(ctx, ring, PS_CONST_BASE * 4 + 4, (const uint32_t *)z, 4);
+          }
+       }
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index a62036e..5201972 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -68,8 +68,6 @@ fd2_emit_alu_consts(struct fd_context *ctx, struct fd_ringbuffer *ring,
+       OUT_RING(ring, sh[i]);
+ }
+ 
+-#define VS_CONST_BASE 0x20
+-#define PS_CONST_BASE 0x120
+ 
+ static void
+ emit_constants(struct fd_context *ctx, struct fd_ringbuffer *ring, uint32_t base,
+@@ -612,12 +610,12 @@ fd2_emit_restore(struct fd_context *ctx, struct fd_ringbuffer *ring)
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_VS_CONST));
+    OUT_RING(ring, A2XX_SQ_VS_CONST_BASE(VS_CONST_BASE) |
+-                     A2XX_SQ_VS_CONST_SIZE(0x100));
++                     A2XX_SQ_VS_CONST_SIZE(0xff));
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 2);
+    OUT_RING(ring, CP_REG(REG_A2XX_SQ_PS_CONST));
+    OUT_RING(ring,
+-            A2XX_SQ_PS_CONST_BASE(PS_CONST_BASE) | A2XX_SQ_PS_CONST_SIZE(0xe0));
++            A2XX_SQ_PS_CONST_BASE(PS_CONST_BASE) | A2XX_SQ_PS_CONST_SIZE(0xff));
+ 
+    OUT_PKT3(ring, CP_SET_CONSTANT, 3);
+    OUT_RING(ring, CP_REG(REG_A2XX_VGT_MAX_VTX_INDX));
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+index ffd46aa..178f11a 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.h
+@@ -21,6 +21,12 @@ struct fd2_vertex_buf {
+    unsigned comp_bits;   /* component size of the fetched format (0: 32) */
+ };
+ 
++/* Xenos: vertex constants from 0 and pixel constants from 256, 256 each
++ * (the split libxenon and xsdk use); a0-relative reads in pixel shaders
++ * read nothing with fd2's 0x20/0x120 split */
++#define VS_CONST_BASE 0x00
++#define PS_CONST_BASE 0x100
++
+ void fd2_emit_alu_consts(struct fd_context *ctx, struct fd_ringbuffer *ring,
+                          uint32_t base, const uint32_t *vals, unsigned n);
+ void fd2_xenos_align(struct fd_ringbuffer *ring, unsigned rem);
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index 803a7f0..16e2928 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -309,7 +309,7 @@ fd2_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
+       if (fp->texround_samplers &&
+           (prog == &ctx->solid_prog || prog == &ctx->blit_prog[0] || prog == &ctx->blit_z)) {
+          static const uint32_t zero[12 * 4];
+-         fd2_emit_alu_consts(ctx, ring, (0x120 + IR2_TEXROUND_CONST) * 4, zero, ARRAY_SIZE(zero));
++         fd2_emit_alu_consts(ctx, ring, (PS_CONST_BASE + IR2_TEXROUND_CONST) * 4, zero, ARRAY_SIZE(zero));
+       }
+       fs_gprs = (fpi->max_reg < 0) ? (is_xenos(ctx->screen) ? 0 : 0x80) : fpi->max_reg;
+       vs_export = MAX2(1, f->inputs_count) - 1;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.c b/src/gallium/drivers/freedreno/a2xx/ir2.c
+index 98f1ca6..0fd8afc 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.c
+@@ -241,10 +241,21 @@ sched_next(struct ir2_context *ctx, struct ir2_sched_instr *sched)
+          export = MIN2(export, export_buf(instr->alu.export));
+    }
+ 
++   /* an export's ALLOC loses a0 (xsdk docs/HARDWARE.md, "Reads at a0"):
++    * no export between a MOVA and its relative read */
++   bool a0_pending = false;
++   ir2_foreach_instr (p, ctx) {
++      if (p->need_emit && p->dep >= 0 && !ctx->instr[p->dep].need_emit)
++         a0_pending = true;
++   }
++
+    ir2_foreach_instr (instr, ctx) {
+       if (!instr->need_emit)
+          continue;
+ 
++      if (a0_pending && is_export(instr))
++         continue;
++
+       /* dont mix exports */
+       if (is_export(instr) && export_buf(instr->alu.export) != export)
+          continue;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2.h b/src/gallium/drivers/freedreno/a2xx/ir2.h
+index 880486e..a060c33 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2.h
+@@ -55,7 +55,7 @@ struct ir2_shader_info {
+ 
+ /* fragment shader constant per sampler holding the coordinate offset that
+  * makes the filter's truncated 6-bit weights round (ir2_lower_tex_round) */
+-#define IR2_TEXROUND_CONST 212   /* + 12 samplers: the last of the 224 PS constants */
++#define IR2_TEXROUND_CONST 212   /* + 12 samplers, below the 256 PS constants */
+ 
+ struct ir2_frag_linkage {
+    unsigned inputs_count;
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+index 51d7671..8b16b87 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_cp.c
+@@ -192,6 +192,13 @@ cp_export(struct ir2_context *ctx)
+             redirect &= reg != get_reg_src(ctx, src);
+       }
+ 
++      /* a relative read can't be an export: its ALLOC would come after
++       * the MOVA and lose a0 */
++      for (int i = 0; i < num_instr; i++) {
++         for (int j = 0; j < ins[i]->src_count; j++)
++            redirect &= !(ins[i]->src[j].type == IR2_SRC_CONST && ins[i]->src[j].rel);
++      }
++
+       if (!redirect)
+          continue;
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index f5994dc..e0a0c1b 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -821,11 +821,12 @@ emit_intrinsic(struct ir2_context *ctx, nir_intrinsic_instr *intr)
+          instr->src[0] = ir2_src(idx, 0, IR2_SRC_CONST);
+          break;
+       }
+-      /* Xenos vertex shaders (indirect_const_addr): MOVAs sets
++      /* Xenos (indirect_const_addr): MOVAs sets
+        * a0 = floor(offset + 0.5), then the constant operand reads
+        * c[base + a0]. The scheduler keeps each MOVA between the previous
+-       * relative read and its own. */
+-      assert(ctx->so->is_xenos && ctx->so->type == MESA_SHADER_VERTEX);
++       * relative read and its own, with no export (whose ALLOC loses a0)
++       * in between. */
++      assert(ctx->so->is_xenos);
+       struct ir2_instr *mova = ir2_instr_create(ctx, IR2_ALU);
+       mova->alu.vector_opc = VECTOR_NONE;
+       mova->alu.scalar_opc = MOVAs;
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index ba15800..31d719c 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -284,10 +284,8 @@ fd_init_shader_caps(struct fd_screen *screen)
+ 
+       /* a2xx compiler doesn't handle indirect temps: */
+       caps->indirect_temp_addr = is_ir3(screen);
+-      /* Xenos vertex shaders index constants with a0 (MOVAs); pixel
+-       * shaders keep the if/else lowering (D3D9 ps_3_0 had no a0) */
+-      caps->indirect_const_addr = is_ir3(screen) ||
+-         (is_xenos(screen) && i == MESA_SHADER_VERTEX);
++      /* Xenos indexes constants with a0 (MOVAs) in both stages */
++      caps->indirect_const_addr = is_ir3(screen) || is_xenos(screen);
+ 
+       caps->tgsi_sqrt_supported = true;
+ 
+-- 
+2.53.0
+
