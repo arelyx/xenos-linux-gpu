@@ -460,15 +460,13 @@ static const struct drm_gem_object_funcs xe_pool_gem_funcs = {
 
 static struct drm_gem_dma_object *xe_pool_gem_create(struct drm_device *dev, size_t size)
 {
-	struct genpool_data_align align;
 	struct xe_gem_obj *xo;
 	unsigned long v;
 
 	if (!xe_pool)
 		return NULL;
 	size = PAGE_ALIGN(size);
-	align.align = min_t(size_t, roundup_pow_of_two(size), 2u << 20);
-	v = gen_pool_alloc_algo(xe_pool, size, gen_pool_first_fit_align, &align);
+	v = xe_pool_alloc(size);
 	if (!v) {
 		if (msm_debug)
 			pr_info("xegpu: pool has no %zu KB block (%zu KB free)\n", size >> 10,

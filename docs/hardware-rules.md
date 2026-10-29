@@ -178,11 +178,11 @@ The texture unit computes the weight as floor(frac * 64) / 64, with no coordinat
 
 ### 35. Rasterized depth and exported depth round differently
 
-An exported fragment depth (export 61) is stored as round(d * (2^n - 1)), as GL wants. A rasterized z, including a clear that sets the depth through `PA_CL_VPORT_ZOFFSET`, is one step off for some ranges: d * 2^n for d in (0.5, 0.5625), d * (2^n - 1) above (`gltest/glzeq.c`). Mesa 0070 clears depth with a program that exports it, so `glClearDepth(d)` matches `gl_FragDepth = d`.
+An exported fragment depth (export 61) is stored as round(d * (2^n - 1)), as GL wants. A rasterized z, including a clear that sets the depth through `PA_CL_VPORT_ZOFFSET`, is one step off for some ranges: d * 2^n for d in (0.5, 0.5625), d * (2^n - 1) above (`gltest/glzeq.c`). Mesa 0070 clears depth with a program that exports it, so `glClearDepth(d)` matches `gl_FragDepth = d`; 0074 does that only for depths other than 0.0 and 1.0, which the rasterized clear stores exactly, because a full-screen depth export costs about 0.37 ms per frame at 800x600.
 
 ### 36. The GPU pool is three 16 MB blocks, adjacent in practice
 
-With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB pool as three `dma_alloc_coherent` blocks. `gen_pool` never places one buffer across two chunks, so a 2048x2048 RGBA texture (16 MB, 21 MB with mipmaps) could not be allocated even with the pool empty. The blocks came out physically adjacent (`0x13000000`..`0x16000000`); the module sorts them, maps each adjacent run once more with `vmap` and the coherent attributes, and adds it to the pool as one range (`dmesg`: `pool range 13000000 + 49152 KB (3 chunks)`). With `pool_mb=80` at boot, five blocks come out adjacent as well.
+With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB pool as three `dma_alloc_coherent` blocks. `gen_pool` never places one buffer across two chunks, so a 2048x2048 RGBA texture (16 MB, 21 MB with mipmaps) could not be allocated even with the pool empty. The blocks came out physically adjacent (`0x13000000`..`0x16000000`); the module sorts them, maps each adjacent run once more with `vmap` and the coherent attributes, and adds it to the pool as one range (`dmesg`: `pool range 13000000 + 49152 KB (3 chunks)`). With `pool_mb=80` at boot, five blocks come out adjacent as well. Buffers under 1 MB are placed from the top of the pool and bigger ones from the bottom: first-fit for everything let rings and small textures made while big textures were alive split the pool, and a 64 MB texture failed with 79 of 80 MB free.
 
 ## Formats
 

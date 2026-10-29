@@ -587,12 +587,52 @@ static void pool_destroy(void)
 	pool_nchunks = 0;
 }
 
+/* Small buffers (rings, uniforms, small textures) come from the top of the
+ * pool and big ones from the bottom: allocated first-fit, small buffers made
+ * while big textures were alive landed between them and split the pool, so a
+ * 64 MB texture failed with 79 of 80 MB free (piglit tex3d-maxsize). */
+#define XE_POOL_SMALL (1u << 20)
+
+static unsigned long xe_last_fit_align(unsigned long *map, unsigned long size,
+				       unsigned long start, unsigned int nr, void *data,
+				       struct gen_pool *pool, unsigned long start_addr)
+{
+	struct genpool_data_align *alignment = data;
+	int order = pool->min_alloc_order;
+	unsigned long align_mask = ((alignment->align + (1UL << order) - 1) >> order) - 1;
+	unsigned long align_off = (start_addr & (alignment->align - 1)) >> order;
+	long pos;
+
+	if (nr > size)
+		return size;
+	pos = size - nr;
+	while (pos >= (long)start) {
+		unsigned long b;
+		/* align pos down so that (pos + align_off) is a multiple of the alignment */
+		pos = ((pos + align_off) & ~align_mask) - align_off;
+		if (pos < (long)start)
+			break;
+		b = find_next_bit(map, pos + nr, pos);
+		if (b >= pos + nr)
+			return pos;
+		pos = (long)b - nr;
+	}
+	return size;
+}
+
+static unsigned long xe_pool_alloc(size_t size)
+{
+	struct genpool_data_align align = { .align = min_t(size_t, roundup_pow_of_two(size), 2u << 20) };
+
+	return gen_pool_alloc_algo(xe_pool, size,
+				   size < XE_POOL_SMALL ? xe_last_fit_align : gen_pool_first_fit_align,
+				   &align);
+}
+
 static bool bo_alloc(struct xegpu_bo *bo)
 {
 	if (xe_pool) {
-		struct genpool_data_align align = { .align = roundup_pow_of_two(bo->size) < (2u << 20) ?
-						    roundup_pow_of_two(bo->size) : (2u << 20) };
-		unsigned long v = gen_pool_alloc_algo(xe_pool, bo->size, gen_pool_first_fit_align, &align);
+		unsigned long v = xe_pool_alloc(bo->size);
 		if (v) {
 			bo->vaddr = (void *)v;
 			bo->dma = gen_pool_virt_to_phys(xe_pool, v);

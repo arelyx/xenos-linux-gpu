@@ -1,0 +1,65 @@
+From dbaa4b60e472b98a5467b4c5ffd289c4fec02627 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 17:16:22 -0700
+Subject: [PATCH] freedreno/a2xx: depth-export clears only for depths other
+ than 0 and 1
+
+A full-screen depth export costs ~0.37 ms per frame at glmark2's size
+(build 891 -> 672 FPS, every scene ~25% slower). The rasterized clear
+stores 0.0 and 1.0 exactly; keep the export path for the other values,
+where it differs by a step (depth-clear-precision-check).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_context.h |  3 +++
+ src/gallium/drivers/freedreno/a2xx/fd2_draw.c    | 11 ++++++++---
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_context.h b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+index 6916c53..9907418 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_context.h
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_context.h
+@@ -29,6 +29,9 @@ struct fd2_context {
+    /* batch whose draw ring already holds the current filter rounding
+     * constants (fd2_emit.c; the gmem programs zero them per tile) */
+    unsigned texround_seqno;
++
++   /* the depth clear in progress uses solid_z_prog (fd2_draw.c) */
++   bool clear_z_export;
+    bool texround_valid;
+ };
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+index 4a5e4cd..48b9b02 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_draw.c
+@@ -294,7 +294,8 @@ clear_state(struct fd_batch *batch, struct fd_ringbuffer *ring,
+ 
+    fd2_program_emit(ctx, ring,
+                     (is_xenos(ctx->screen) && !fast_clear && (buffers & FD_BUFFER_DEPTH) &&
+-                     ctx->solid_z_prog.fs) ? &ctx->solid_z_prog : &ctx->solid_prog);
++                     ctx->solid_z_prog.fs && fd2_context(ctx)->clear_z_export)
++                       ? &ctx->solid_z_prog : &ctx->solid_prog);
+ 
+    if (is_xenos(ctx->screen)) {
+       fd2_xenos_invalidate_caches(ring);
+@@ -633,8 +634,12 @@ fd2_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
+          OUT_RING(ring, CP_REG(REG_A2XX_PA_CL_VPORT_ZSCALE));
+          OUT_RING(ring, fui(0.0f));
+          OUT_RING(ring, fui(depth));
+-         /* Xenos: and in C1 for the depth export of solid_z_prog */
+-         if (is_xenos(ctx->screen)) {
++         /* Xenos: and in C1 for the depth export of solid_z_prog. A
++          * full-screen depth export costs ~0.35 ms at 1280x720 (glmark2
++          * build 891 -> 672 FPS): only for the values where the rasterized z
++          * differs from the exported one, not 0 and 1 */
++         fd2_context(ctx)->clear_z_export = is_xenos(ctx->screen) && depth != 0.0 && depth != 1.0;
++         if (fd2_context(ctx)->clear_z_export) {
+             float z[4] = {depth, depth, depth, depth};
+             fd2_emit_alu_consts(ctx, ring, 0x480 + 4, (const uint32_t *)z, 4);
+          }
+-- 
+2.53.0
+
