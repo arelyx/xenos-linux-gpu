@@ -117,9 +117,9 @@ Ring to IB to IB works. A third level wedges the GPU (libxenon's cube replayed w
 
 `CP_INTERRUPT` with opcode `0x40` raises the fence interrupt on this console. Xenia's `0x54` raises nothing.
 
-### 21. No software reset
+### 21. No working software reset (yet)
 
-libxenon's RBBM soft-reset sequence hung the whole console when tried. A wedged GPU needs a power cycle. Plan everything around that.
+libxenon never implemented a GPU reset, and the RBBM soft-reset sequence we tried hung the whole console. So, for this project, a wedged GPU needed a power cycle and everything was planned around that. This is a gap in what we know, not a documented hardware limit: Microsoft's own software presumably recovers the GPU, and people familiar with the hardware think a reset is possible.
 
 ### 22. MMIO only with aligned 32-bit accesses
 
@@ -192,7 +192,7 @@ With 64K pages the largest buddy block is 16 MB, so `xegpu` reserves its 48 MB p
 
 ## CPU side (Xenon)
 
-- The kernel's Xenon CPU table lacks AltiVec, so any vector instruction gets SIGILL from the vector-unavailable trap. Patched (`kernel/patches/0002-xenon-altivec.patch`).
+- The kernel's Xenon CPU table leaves AltiVec off, so any vector instruction gets SIGILL from the vector-unavailable trap. That is deliberate in Free60: VMX128 isn't a complete AltiVec, and programs that see AltiVec advertised pick code that crashes (next item). `kernel/patches/0002-xenon-altivec.patch` turns it on; don't use it, see the README's caveats.
 - VMX128 lacks the AltiVec integer multiply and sum family (`vmulouh`, `vmsumuhm` and friends). GCC auto-vectorises integer code with them. pixman's VMX paths crash; use `PIXMAN_DISABLE=vmx`.
 - The core lacks `ldbrx`/`stdbrx`. `-mcpu=cell` emits them for `__builtin_bswap64` (GCC bug 43871 describes the same thing on a G5).
 - Use `-mcpu=970 -mtune=cell -mno-altivec` for user space. Ubuntu's ppc64 cross GCC defaults to POWER7, which SIGILLs immediately.

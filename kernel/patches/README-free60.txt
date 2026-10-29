@@ -2,7 +2,10 @@ Kernel fixes found while bringing up Linux 6.18 + Free60 xenon0.30 on a Trinity 
 Kept here only; not submitted to Free60 (see README "Upstream").
 
 0001 sis190 TX wake race      tested on hardware
-0002 Xenon AltiVec            built; tested on hardware (Debian libLLVM loads)
+0002 Xenon AltiVec            NOT RECOMMENDED. Free60 leaves AltiVec off on purpose: VMX128 is not
+                              a complete AltiVec, and advertising it makes software (pixman,
+                              libjpeg-turbo) pick vector code that dies with SIGILL. It was added
+                              only so Debian's libLLVM would load.
 idle (not a patch yet)        Xenon has no ppc_md.power_save, so idle SMT threads spin at
                               medium priority and take ~45% of the core from their sibling.
                               A power_save that spins at low SMT priority (or 1,1,1) with

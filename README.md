@@ -24,6 +24,15 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 
 Nothing here writes to the console's NAND. The only change to the softmod is one byte in a file on the hard disk (see [docs/setup.md](docs/setup.md)).
 
+## Caveats
+
+Read these before reusing anything here.
+
+- **This is an AI-driven experiment.** Claude (Opus) did the work in a loop over about three days, with a human setting direction. Treat it as a proof that the hardware can do this, not as reviewed code.
+- **The kernel side is a standalone shim, not the upstream msm driver.** `xegpu.ko` is libxenon's GPU code moved into a kernel module, plus a fake msm UAPI so Mesa's freedreno accepts it. People who know this hardware think upstream `drivers/gpu/drm/msm` (which already handles Adreno 2xx) could drive Xenos with a few patches. That is very likely the better design; we never evaluated it.
+- **Don't use the AltiVec kernel patch** (`kernel/patches/0002-xenon-altivec.patch`). The Xenon's VMX128 unit lacks parts of AltiVec (the integer multiply and sum family, for a start), and Free60 leaves AltiVec off for exactly that reason: software that sees it advertised picks vector code that then dies with SIGILL. Our own notes show it happening: pixman needs `PIXMAN_DISABLE=vmx`, libjpeg-turbo needs `JSIMD_FORCENONE=1`. The patch only existed so that Debian's libLLVM would load; building without libLLVM, or with vector code off, is the right fix.
+- **Several "hardware rules" are measurements on one console** (a Trinity slim), not documentation. Where a rule says something is impossible, read it as "we didn't find a way".
+
 ## What was new
 
 Most of the work was finding out where Xenos differs from the Adreno 200 that freedreno targets. They share an ISA and most of a register map, which made freedreno the right starting point and also made every difference silent: the GPU just stops. [docs/hardware-rules.md](docs/hardware-rules.md) lists each rule with the evidence. The ones that cost the most time:
@@ -41,7 +50,7 @@ Most of the work was finding out where Xenos differs from the Adreno 200 that fr
 
 ## How it was debugged
 
-The Xenos has no software reset. A wedged GPU stays wedged until the console loses power, and a bad memory write takes the whole console with it. We built an IR blaster (Arduino + IR LED) and patched one byte of the softmod so that a Windows Media Center remote's power code boots straight into Xell and Linux. A host script can now power-cycle the console in about 80 seconds, so a test harness can run thousands of GL tests, survive hangs, and attribute each hang to a test. [docs/methodology.md](docs/methodology.md) covers that, the replay tools, the Xenia-based linters and the footguns we hit on the way ([docs/footguns.md](docs/footguns.md)).
+We have no working software reset for the Xenos: libxenon never implemented one, and the RBBM soft-reset sequence we tried hung the console (hardware rule 21). That's a gap in our knowledge, not a known hardware limit. So a wedged GPU stays wedged until the console loses power, and a bad memory write takes the whole console with it. We built an IR blaster (Arduino + IR LED) and patched one byte of the softmod so that a Windows Media Center remote's power code boots straight into Xell and Linux. A host script can now power-cycle the console in about 80 seconds, so a test harness can run thousands of GL tests, survive hangs, and attribute each hang to a test. [docs/methodology.md](docs/methodology.md) covers that, the replay tools, the Xenia-based linters and the footguns we hit on the way ([docs/footguns.md](docs/footguns.md)).
 
 ## Layout
 
@@ -49,7 +58,7 @@ The Xenos has no software reset. A wedged GPU stays wedged until the console los
 kernel/xegpu/        xegpu.ko: CP, ring, fences, pool, KMS display (xenos_drm.c), msm UAPI (msm_compat.c)
 kernel/include/      xegpu_uapi.h
 kernel/xenon_idle/   low-priority idle loop for the Xenon SMT threads (1.85x single-thread speed)
-kernel/patches/      Free60 kernel fixes: sis190 TX wake race, AltiVec for Xenon
+kernel/patches/      Free60 kernel fixes: sis190 TX wake race; AltiVec for Xenon (not recommended, see below)
 userspace/           libxenon's xe.c/edram.c ported to Linux user space, xeinit (EDRAM training), tests, replay tool
 mesa/patches/        git format-patch series on Mesa (base ab1502f), cross file
 xorg/                glamor big-endian GLES patch (xorg-server 21.1.25), xcopytest (copy/PutImage checker)

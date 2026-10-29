@@ -350,7 +350,7 @@ static void xenos_update(struct drm_simple_display_pipe *pipe,
 			return;
 		}
 		blit_fail_count++;
-		/* a failed blit means the GPU is wedged (no software reset on Xenos):
+		/* a failed blit means the GPU is wedged (no working GPU reset here):
 		 * stop trying, or every screen update waits out the fence timeout */
 		gpu_blit = 0;
 		pr_warn("xegpu: GPU blit failed (%d); CPU scanout conversion from now on (gpu_blit=0)\n", rc);

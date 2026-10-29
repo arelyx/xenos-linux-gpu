@@ -290,7 +290,7 @@ static int cp_submit(u32 addr, u32 ndw, u64 *fence_out)
 		return -EIO;
 	}
 	/* Wait for ring space. If the CP stops reading the ring for 3 s the GPU is
-	 * hung (no software reset on Xenos): say so, count it as a stall and fail
+	 * hung (no working GPU reset here): say so, count it as a stall and fail
 	 * every later submit with -EIO, instead of user space spinning in this
 	 * ioctl with nothing logged (a resize hang did that, 26 Oct 2026). */
 	if (rb_free() < 64) {
