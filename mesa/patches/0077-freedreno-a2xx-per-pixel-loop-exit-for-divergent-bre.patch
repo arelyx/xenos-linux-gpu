@@ -1,0 +1,321 @@
+From 13241529bc7faa7920b2ce9e77ca25d049bd787f Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 08:30:14 -0700
+Subject: [PATCH] freedreno/a2xx: per-pixel loop exit for divergent breaks on
+ Xenos
+
+A predicated control-flow instruction decides for all 64 pixels of a
+sequencer: (p0) is taken if any pixel has p0, (!p0) only if none has
+(Xenia's ucode.h, from the sequencer specification). A break inside an if
+was a (p0) jump, so one pixel breaking took every pixel out of the loop.
+
+For innermost loops without discard whose breaks can diverge (NIR
+divergence analysis), a register holds 1.0 while the pixel is in the
+loop: the body is predicated on it, a break clears it under the current
+predicate, code after a breaking if is predicated again, and the back
+edge, under that predicate, is a (p0) jump taken while any pixel is
+still active. Predicated-off pixels keep their registers.
+
+dEQP shaders.return.return_in_dynamic_loop_dynamic_{vertex,fragment}
+pass. Nested loops and loops with discard keep plain jumps (both hung:
+a killed pixel keeps active set). Uniform loops keep plain jumps (17%
+slower in glmark2's uniform loop otherwise).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/ir2_nir.c  | 217 +++++++++++++++++-
+ .../drivers/freedreno/a2xx/ir2_private.h      |   5 +
+ 2 files changed, 221 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+index b74c6c7..480854d 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_nir.c
+@@ -1163,6 +1163,172 @@ extra_position_exports(struct ir2_context *ctx, bool binning)
+ 
+ static bool emit_cf_list(struct ir2_context *ctx, struct exec_list *list);
+ 
++/* Per-pixel loop exit. A predicated jump decides for all 64 pixels of a
++ * sequencer at once: (p0) jumps if any pixel has p0, (!p0) only if none has
++ * (Xenia's ucode.h, from the sequencer specification). A break inside an if
++ * was a (p0) jump, so one pixel breaking took all of them out of the loop
++ * (dEQP shaders.return.return_in_dynamic_loop_dynamic_*). For such loops a
++ * register holds 1.0 while the pixel is in the loop: a break clears it under
++ * the current predicate, the body and the code after an if that may break
++ * are predicated on it, and the back edge, under that predicate, is a (p0)
++ * jump taken while any pixel is still active. Predicated-off pixels keep
++ * their registers, as a loop requires. */
++
++static bool
++list_has_break(struct exec_list *list)
++{
++   foreach_list_typed (nir_cf_node, node, node, list) {
++      if (node->type == nir_cf_node_block) {
++         nir_instr *last = nir_block_last_instr(nir_cf_node_as_block(node));
++         if (last && last->type == nir_instr_type_jump &&
++             nir_instr_as_jump(last)->type == nir_jump_break)
++            return true;
++      } else if (node->type == nir_cf_node_if) {
++         nir_if *nif = nir_cf_node_as_if(node);
++         if (list_has_break(&nif->then_list) || list_has_break(&nif->else_list))
++            return true;
++      }
++      /* breaks in nested loops belong to those loops */
++   }
++   return false;
++}
++
++static bool
++list_has_continue(struct exec_list *list)
++{
++   foreach_list_typed (nir_cf_node, node, node, list) {
++      if (node->type == nir_cf_node_block) {
++         nir_instr *last = nir_block_last_instr(nir_cf_node_as_block(node));
++         if (last && last->type == nir_instr_type_jump &&
++             nir_instr_as_jump(last)->type == nir_jump_continue)
++            return true;
++      } else if (node->type == nir_cf_node_if) {
++         nir_if *nif = nir_cf_node_as_if(node);
++         if (list_has_continue(&nif->then_list) || list_has_continue(&nif->else_list))
++            return true;
++      }
++   }
++   return false;
++}
++
++/* does the loop body have a break inside an if (not at its top level)? */
++/* also true for a discard: a killed pixel keeps active = 1 (its writes stop)
++ * and the back edge then never stops being taken (dEQP
++ * shaders.discard.dynamic_loop_* hung) */
++static bool
++list_has_loop(struct exec_list *list)
++{
++   foreach_list_typed (nir_cf_node, node, node, list) {
++      if (node->type == nir_cf_node_loop)
++         return true;
++      if (node->type == nir_cf_node_block) {
++         nir_foreach_instr (instr, nir_cf_node_as_block(node)) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
++            if (op == nir_intrinsic_terminate || op == nir_intrinsic_terminate_if ||
++                op == nir_intrinsic_demote || op == nir_intrinsic_demote_if)
++               return true;
++         }
++      }
++      if (node->type == nir_cf_node_if) {
++         nir_if *nif = nir_cf_node_as_if(node);
++         if (list_has_loop(&nif->then_list) || list_has_loop(&nif->else_list))
++            return true;
++      }
++   }
++   return false;
++}
++
++static bool
++loop_needs_active(nir_loop *nloop)
++{
++   /* innermost loops without discard only: a loop inside the predicated body
++    * would have its own jumps decided under our predicate (nested-loop dEQP
++    * cases hung) */
++   if (list_has_continue(&nloop->body) || list_has_loop(&nloop->body) ||
++       !nloop->divergent_break)
++      return false;
++   foreach_list_typed (nir_cf_node, node, node, &nloop->body) {
++      if (node->type == nir_cf_node_if) {
++         nir_if *nif = nir_cf_node_as_if(node);
++         if (list_has_break(&nif->then_list) || list_has_break(&nif->else_list))
++            return true;
++      }
++   }
++   return false;
++}
++
++static struct ir2_src
++loop_active_src(struct ir2_context *ctx)
++{
++   struct ir2_instr *a = ctx->loop_active[ctx->loop_depth];
++   struct ir2_src res = ir2_src(a->reg - ctx->reg, IR2_SWIZZLE_XXXX, IR2_SRC_REG);
++   update_range(ctx, a->reg);
++   return res;
++}
++
++/* active = value, under the current predicate */
++static void
++loop_active_write(struct ir2_context *ctx, float value)
++{
++   struct ir2_instr *a = ctx->loop_active[ctx->loop_depth];
++   struct ir2_instr *instr = instr_create_alu_reg(ctx, nir_op_mov, 1, a);
++   instr->src[0] = load_const(ctx, (float[]){value}, 1);
++   update_range(ctx, a->reg);
++}
++
++/* begin/end a predicated region on the active register, like emit_if */
++static void
++pred_begin(struct ir2_context *ctx, unsigned *saved_pred, unsigned *saved_idx)
++{
++   struct ir2_instr *instr;
++   *saved_pred = ctx->pred;
++   *saved_idx = ctx->pred_idx;
++
++   instr = ir2_instr_create(ctx, IR2_ALU);
++   instr->src[0] = loop_active_src(ctx);
++   instr->src_count = 1;
++   instr->ssa.ncomp = 1;
++   instr->alu.vector_opc = VECTOR_NONE;
++   instr->alu.scalar_opc = SCALAR_NONE;
++   instr->alu.export = -1;
++   instr->alu.write_mask = 1;
++   instr->pred = 0;
++   if (*saved_pred) {
++      instr->alu.vector_opc = PRED_SETNE_PUSHv;
++      instr->src[1] = instr->src[0];
++      instr->src[0] = ir2_src(*saved_idx, 0, IR2_SRC_SSA);
++      instr->src[0].swizzle = IR2_SWIZZLE_XXXX;
++      instr->src[1].swizzle = IR2_SWIZZLE_XXXX;
++      instr->src_count = 2;
++   } else {
++      instr->alu.scalar_opc = PRED_SETNEs;
++   }
++   ctx->pred_idx = instr->idx;
++   ctx->pred = 3;
++}
++
++static void
++pred_end(struct ir2_context *ctx, unsigned saved_pred, unsigned saved_idx)
++{
++   if (saved_pred) {
++      struct ir2_instr *instr = ir2_instr_create(ctx, IR2_ALU);
++      instr->src[0] = ir2_src(ctx->pred_idx, 0, IR2_SRC_SSA);
++      instr->src_count = 1;
++      instr->ssa.ncomp = 1;
++      instr->alu.vector_opc = VECTOR_NONE;
++      instr->alu.scalar_opc = PRED_SET_POPs;
++      instr->alu.export = -1;
++      instr->alu.write_mask = 1;
++      instr->pred = 0;
++      ctx->pred_idx = instr->idx;
++   } else {
++      ctx->pred_idx = saved_idx;
++   }
++   ctx->pred = saved_pred;
++}
++
+ static bool
+ emit_block(struct ir2_context *ctx, nir_block *block)
+ {
+@@ -1177,6 +1343,15 @@ emit_block(struct ir2_context *ctx, nir_block *block)
+    if (!succs || !succs->index)
+       return false;
+ 
++   /* break inside an if of a per-pixel-exit loop: leave by clearing active */
++   if (ctx->loop_active[ctx->loop_depth] && ctx->pred &&
++       ctx->block_has_jump[block->index] &&
++       succs->index == ctx->loop_exit_block[ctx->loop_depth]) {
++      loop_active_write(ctx, 0.0f);
++      return false;
++   }
++
++
+    /* we want to be smart and always jump and have the backend cleanup
+     * but we are not, so there are two cases where jump is needed:
+     *  loops (succs index lower)
+@@ -1288,8 +1463,30 @@ static void
+ emit_loop(struct ir2_context *ctx, nir_loop *nloop)
+ {
+    assert(!nir_loop_has_continue_construct(nloop));
++   struct ir2_instr *active = NULL;
++   nir_cf_node *next = nir_cf_node_next(&nloop->cf_node);
++
++   if (fd2_xenos && !ctx->pred && next && next->type == nir_cf_node_block &&
++       loop_needs_active(nloop)) {
++      /* active = 1.0 before the loop, at the outer loop depth */
++      active = instr_create_alu_reg(ctx, nir_op_mov, 1, NULL);
++      active->src[0] = load_const(ctx, (float[]){1.0f}, 1);
++      update_range(ctx, active->reg);
++   }
+    ctx->loop_last_block[++ctx->loop_depth] = loop_last_block(&nloop->body);
+-   emit_cf_list(ctx, &nloop->body);
++   ctx->loop_active[ctx->loop_depth] = active;
++   if (active) {
++      /* the whole body runs only where active: the back edge, predicated on
++       * it, is then a (p0) jump, taken while any pixel is still active */
++      unsigned saved_pred, saved_idx;
++      ctx->loop_exit_block[ctx->loop_depth] = nir_cf_node_as_block(next)->index;
++      pred_begin(ctx, &saved_pred, &saved_idx);
++      emit_cf_list(ctx, &nloop->body);
++      pred_end(ctx, saved_pred, saved_idx);
++   } else {
++      emit_cf_list(ctx, &nloop->body);
++   }
++   ctx->loop_active[ctx->loop_depth] = NULL;
+    ctx->loop_depth--;
+ }
+ 
+@@ -1297,6 +1494,8 @@ static bool
+ emit_cf_list(struct ir2_context *ctx, struct exec_list *list)
+ {
+    bool ret = false;
++   unsigned guards = 0, saved_pred[16], saved_idx[16];
++   unsigned depth = ctx->loop_depth;
+    foreach_list_typed (nir_cf_node, node, node, list) {
+       ret = false;
+       switch (node->type) {
+@@ -1305,6 +1504,14 @@ emit_cf_list(struct ir2_context *ctx, struct exec_list *list)
+          break;
+       case nir_cf_node_if:
+          emit_if(ctx, nir_cf_node_as_if(node));
++         /* code after an if that may clear active runs only where active */
++         if (ctx->loop_active[depth] && guards < ARRAY_SIZE(saved_pred) &&
++             nir_cf_node_next(node) &&
++             (list_has_break(&nir_cf_node_as_if(node)->then_list) ||
++              list_has_break(&nir_cf_node_as_if(node)->else_list))) {
++            pred_begin(ctx, &saved_pred[guards], &saved_idx[guards]);
++            guards++;
++         }
+          break;
+       case nir_cf_node_loop:
+          emit_loop(ctx, nir_cf_node_as_loop(node));
+@@ -1314,6 +1521,8 @@ emit_cf_list(struct ir2_context *ctx, struct exec_list *list)
+          break;
+       }
+    }
++   while (guards--)
++      pred_end(ctx, saved_pred[guards], saved_idx[guards]);
+    return ret;
+ }
+ 
+@@ -1442,6 +1651,12 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
+       ;
+    OPT_V(ctx->nir, nir_opt_algebraic_late);
+ 
++   /* per-pixel loop exit only for loops whose breaks can diverge (a uniform
++    * trip count runs as plain jumps: glmark2 loop fragment-uniform=true was
++    * 17% slower with the active register). Needs SSA; the result stays on
++    * the loop nodes. */
++   if (fd2_xenos)
++      nir_divergence_analysis(ctx->nir);
+    OPT_V(ctx->nir, nir_convert_from_ssa, true, false);
+ 
+    OPT_V(ctx->nir, nir_move_vec_src_uses_to_dest, false);
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 564f571..1839c41 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -139,6 +139,11 @@ struct ir2_context {
+    unsigned loop_last_block[64];
+    unsigned loop_depth;
+ 
++   /* per-pixel loop exit (emit_loop): for a loop whose breaks sit inside
++    * ifs, an "active" register per pixel replaces the jumps */
++   struct ir2_instr *loop_active[64];   /* instr writing the register, 0 = plain loop */
++   unsigned loop_exit_block[64];
++
+    nir_shader *nir;
+ 
+    /* ssa index of position output */
+-- 
+2.53.0
+

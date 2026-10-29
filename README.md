@@ -15,7 +15,7 @@ This repo holds everything from a two-day bring-up on a softmodded Xbox 360 (Tri
 | Kernel | Linux 6.18.58 + Free60 xenon patch (plus sis190 TX fix, VMX enabled but not advertised), netbooted by Xell, Debian unstable ppc64 on NFS |
 | GPU driver | `xegpu.ko`: CP microcode and ring, fences on interrupts, boot-time contiguous pool (80 MB, one range), KMS display, msm UAPI subset with a command checker |
 | GL | Mesa freedreno a2xx with a Xenos variant (gpu_id 290), GLES 2.0 and desktop OpenGL 2.0 (EGL, GLX), in X windows through DRI3 |
-| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 99.9% of executed cases pass (17,060 of 17,075), no GPU hangs (`conformance/results/full37-report.txt`). 15 cases still fail, listed in docs/conformance.md |
+| Conformance | dEQP-GLES2 must-pass list, all 17,165 cases: 99.9% of executed cases pass (17,062 of 17,075), no GPU hangs (`conformance/results/full40-report.txt`). 13 cases still fail, listed in docs/conformance.md |
 | X | Xorg 21.1 modesetting + glamor (GLES2), depth 24/32 accelerated, no hangs with xclock/xeyes/xlogo/xterm |
 | Performance | Four rounds ([docs/performance.md](docs/performance.md)): fills, text, composites, large copies, scrolls and uploads beat CPU rendering (rect10 2.9M/s vs 1.7M, aa10text 839k vs 290k, scroll500 5,480 vs 904); tiny copies, tiny uploads and readback still lose. glmark2-es2: all 32 scenes run, 34-898 FPS at 800x600 (`conformance/results/glmark2-2026-10-28.txt`) |
 | Desktop | IceWM on glamor by default (Xfce works but 458 MB is tight), GLES and GLX apps on the GPU in X windows. Tried: NetSurf (Wikipedia with images), neverball and chromium-bsu (GL 1.x/2.0 games, same output as Mesa's software renderer) |

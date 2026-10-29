@@ -62,7 +62,7 @@ What still failed in full9 (50 cases; the first row is fixed in full10):
 | 5 | `clipping` wide points and lines | |
 | 3 | `uniform_api.random.*` | |
 | 3 | `state_query` read type, max vertex uniform vectors (getfloat) | we report `GL_UNSIGNED_INT_8_8_8_8_REV` as the read type on big-endian so glamor accelerates depth 24/32; ES2 doesn't list it |
-| 2 | `shaders.return.return_in_dynamic_loop_dynamic_*` | |
+| 0 | `shaders.return.return_in_dynamic_loop_dynamic_*` (until 2026-10-29) | fixed: per-pixel loop exit (Mesa 0077) |
 | 1 each | `rasterization.limits.points`, `implementation_limits.max_vertex_uniform_vectors`, `clipping.polygon_edge.poly_fan` | |
 
 ## Desktop OpenGL: piglit
@@ -123,3 +123,5 @@ GPU pool 48 -> 80 MB (`pool_mb=80`, five adjacent 16 MB blocks at boot) and Mesa
 glmark2-es2 rerun (`conformance/results/glmark2-2026-10-28.txt`): every scene had become about 25% slower since 2026-10-26, from Mesa 0070's depth-export clears (0.37 ms per frame). Mesa 0074 keeps the export only for depths other than 0 and 1; most scenes are back within 1-6% of 2026-10-26 and all 32 scenes run (`refract` now sets up its depth render target, 64 FPS). `terrain` reads 34 FPS against 112 on 2026-10-26, but the 2026-10-26 Mesa and kernel module together also give 34 today, so that number is not reproducible. xegpu now places buffers under 1 MB from the top of the pool (hardware rule 36). dEQP full35: 99.9%, no regressions. piglit gl20-25: **1,031 pass, 90.4%** of 1,140 (`tex3d-maxsize` and `security/initialized-fbo` pass).
 
 Mesa 0075 (GLES implementation color read type UNSIGNED_BYTE on big-endian, with the matching glamor change) and 0076 (ir2 packs scalars into shared registers): dEQP full36 **17,060 of 17,075, 99.9%**, ten more than full35 (the eight `shaders.indexing.tmp_array.*_dynamic_loop_read` crashes and two `state_query.integers.implementation_color_read`), no regressions. piglit gl20-26: 1,031, identical. perfcheck: within noise once glamor accepted the new read type (before that, depth 24/32 fell back to software).
+
+Mesa 0077 (per-pixel loop exit for divergent breaks, hardware rule 37): dEQP full40 **17,062 of 17,075, 99.9%**, `shaders.return.return_in_dynamic_loop_dynamic_{vertex,fragment}` pass, no regressions, no hangs. The first version hung five dEQP cases (`shaders.discard.dynamic_loop_*`, one nested loop); those loops now keep plain jumps. piglit gl20-30: 1,031, identical. glmark2 loop scenes 627 (uniform, was 616) and 779 (divergent, was 771).
