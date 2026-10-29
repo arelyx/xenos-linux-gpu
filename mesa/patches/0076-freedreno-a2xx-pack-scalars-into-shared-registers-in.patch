@@ -1,0 +1,135 @@
+From 9f3cc3b00f5e0886a657f76dcf433d9d8d1b731b Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 19:20:39 -0700
+Subject: [PATCH 76/76] freedreno/a2xx: pack scalars into shared registers in
+ ir2
+
+ir2 gave every value a whole vec4 register, so unrolled loops over small
+arrays ran out of the 64 registers (assert idx != 64; dEQP
+shaders.indexing.tmp_array.*_dynamic_loop_read, 8 cases). A scalar now
+takes a free component of a register that holds only scalars. live_regs
+is per component, and ra_block_free walks it directly: the
+ir2_foreach_live_reg loop never advanced past a live register from
+another block.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ .../drivers/freedreno/a2xx/ir2_private.h      |  9 +++--
+ src/gallium/drivers/freedreno/a2xx/ir2_ra.c   | 37 +++++++++++++++++--
+ 2 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_private.h b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+index 34e2897..564f571 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_private.h
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_private.h
+@@ -52,6 +52,7 @@ struct ir2_reg {
+    bool initialized;
+    /* block_idx to free on (-1 = free on ref_count==0) */
+    int block_idx_free;
++   uint8_t live_slot;   /* index in ir2_context.live_regs: idx * 4 + component */
+    struct ir2_reg_component comp[4];
+ };
+ 
+@@ -155,7 +156,9 @@ struct ir2_context {
+    uint32_t params_exported;   /* vertex shader: parameter exports written */
+ 
+    /* RA state */
+-   struct ir2_reg *live_regs[64];
++   /* one slot per register component: scalars share registers (ra_reg) */
++   struct ir2_reg *live_regs[64 * 4];
++   uint64_t scalar_regs;   /* registers holding only scalar values */
+    uint32_t reg_state[256 / 32]; /* 64*4 bits */
+ 
+    /* inputs */
+@@ -236,9 +239,9 @@ struct ir2_src ir2_zero(struct ir2_context *ctx);
+ 
+ #define ir2_foreach_live_reg(it, ctx)                                          \
+    for (struct ir2_reg **__ptr = (ctx)->live_regs, *it; ({                     \
+-           while (__ptr != &(ctx)->live_regs[64] && *__ptr == NULL)            \
++           while (__ptr != &(ctx)->live_regs[64 * 4] && *__ptr == NULL)        \
+               __ptr++;                                                         \
+-           __ptr != &(ctx)->live_regs[64] ? (it = *__ptr) : NULL;              \
++           __ptr != &(ctx)->live_regs[64 * 4] ? (it = *__ptr) : NULL;          \
+         });                                                                    \
+         it++)
+ 
+diff --git a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+index 273439e..87fbb92 100644
+--- a/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
++++ b/src/gallium/drivers/freedreno/a2xx/ir2_ra.c
+@@ -148,6 +148,29 @@ ra_reg(struct ir2_context *ctx, struct ir2_reg *reg, int force_idx, bool export,
+          return;
+    }
+ 
++   /* a scalar goes into a free component of a register that holds only
++    * scalars: one per register ran out of the 64 registers in unrolled loops
++    * over small arrays (dEQP shaders.indexing.tmp_array.*_dynamic_loop_read) */
++   unsigned nused = 0;
++   for (int i = 0; i < reg->ncomp; i++)
++      nused += reg->comp[i].ref_count != 0;
++   if (force_idx < 0 && reg->ncomp == 1 && nused == 1) {
++      for (idx = 0; idx < 64; idx++) {
++         unsigned m = reg_mask(ctx, idx);
++         if (m && m != 0xf && (ctx->scalar_regs & BITFIELD64_BIT(idx))) {
++            unsigned c = ffs(~m) - 1;
++            ctx->info->max_reg = MAX2(ctx->info->max_reg, (int)idx);
++            reg->comp[0].c = c;
++            reg_setmask(ctx, idx, c);
++            reg->comp[0].alloc = true;
++            reg->idx = idx;
++            reg->live_slot = idx * 4 + c;
++            ctx->live_regs[reg->live_slot] = reg;
++            return;
++         }
++      }
++   }
++
+    if (force_idx < 0) {
+       for (idx = 0; idx < 64; idx++) {
+          if (reg_mask(ctx, idx) == 0)
+@@ -155,6 +178,10 @@ ra_reg(struct ir2_context *ctx, struct ir2_reg *reg, int force_idx, bool export,
+       }
+    }
+    assert(idx != 64); /* TODO ran out of register space.. */
++   if (reg->ncomp == 1 && nused == 1)
++      ctx->scalar_regs |= BITFIELD64_BIT(idx);
++   else
++      ctx->scalar_regs &= ~BITFIELD64_BIT(idx);
+ 
+    /* update max_reg value */
+    ctx->info->max_reg = MAX2(ctx->info->max_reg, (int)idx);
+@@ -177,7 +204,8 @@ ra_reg(struct ir2_context *ctx, struct ir2_reg *reg, int force_idx, bool export,
+    }
+ 
+    reg->idx = idx;
+-   ctx->live_regs[reg->idx] = reg;
++   reg->live_slot = idx * 4 + (reg->ncomp == 1 && nused == 1 ? reg->comp[0].c : 0);
++   ctx->live_regs[reg->live_slot] = reg;
+ }
+ 
+ /* reduce srcs ref_count and free if needed */
+@@ -208,8 +236,9 @@ ra_src_free(struct ir2_context *ctx, struct ir2_instr *instr)
+ void
+ ra_block_free(struct ir2_context *ctx, unsigned block)
+ {
+-   ir2_foreach_live_reg (reg, ctx) {
+-      if (reg->block_idx_free != block)
++   for (unsigned s = 0; s < ARRAY_SIZE(ctx->live_regs); s++) {
++      struct ir2_reg *reg = ctx->live_regs[s];
++      if (!reg || reg->block_idx_free != block)
+          continue;
+ 
+       for (int i = 0; i < reg->ncomp; i++) {
+@@ -219,6 +248,6 @@ ra_block_free(struct ir2_context *ctx, unsigned block)
+          reg_freemask(ctx, reg->idx, reg->comp[i].c);
+          reg->comp[i].alloc = false;
+       }
+-      ctx->live_regs[reg->idx] = NULL;
++      ctx->live_regs[s] = NULL;
+    }
+ }
+-- 
+2.53.0
+

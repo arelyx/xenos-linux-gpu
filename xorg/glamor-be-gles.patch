@@ -17,3 +17,15 @@
                            GL_BGRA, GL_BGRA, GL_UNSIGNED_BYTE, TRUE);
 +#endif
      } else {
+@@
+         glDeleteTextures(1, &tex);
+         glDeleteFramebuffers(1, &fbo);
+ 
++#if X_BYTE_ORDER == X_BIG_ENDIAN
++        /* Mesa reports GLES-valid BGRA/UNSIGNED_BYTE for these on big-endian
++         * (dEQP); it still reads BGRA/8_8_8_8_REV directly */
++        if (!texture_only && type == GL_UNSIGNED_INT_8_8_8_8_REV &&
++            read_format == format && read_type == GL_UNSIGNED_BYTE)
++            read_type = type;
++#endif
+         if (!texture_only && (format != read_format || type != read_type)) {

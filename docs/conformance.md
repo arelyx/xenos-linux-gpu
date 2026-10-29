@@ -56,7 +56,7 @@ What still failed in full9 (50 cases; the first row is fixed in full10):
 | cases | what | notes |
 |---:|---|---|
 | 14 | `fbo.render.recreate_colorbuffer.*` | fixed in full10: color-only clears kept the depth test |
-| 8 | `shaders.indexing.tmp_array.*` (Crash) | ir2 can't compile dynamically indexed temporary arrays; it aborts instead of hanging the GPU |
+| 0 | `shaders.indexing.tmp_array.*` (Crash until 2026-10-28) | fixed: ir2 packs scalars into shared registers (Mesa 0076) |
 | 6 | `texture.mipmap.2d.projected.*` | projected mipmap level selection |
 | 0 | `texture.size` 2048x2048 mipmapped, 512 cube (ResourceError until 2026-10-28) | fixed: one pool range, 80 MB, Mesa 0071 and 0073 |
 | 5 | `clipping` wide points and lines | |
@@ -121,3 +121,5 @@ Mesa 0072 (performance: skip unchanged filter rounding constants within a batch)
 GPU pool 48 -> 80 MB (`pool_mb=80`, five adjacent 16 MB blocks at boot) and Mesa 0073 (glDeleteTextures drops the units' `_Current` references and the driver's bound sampler views, so a deleted texture's memory is free for the next allocation, not only after the next draw): dEQP full33 **17,050 of 17,075, 99.9%**, no ResourceErrors left (the two `texture.size.2d.2048x2048` mipmap cases pass), no regressions. piglit gl20-23: 1,030 pass (`tex3d-maxsize` passes). perfcheck within noise of the baseline (putimage500 x0.93, its usual 160-180 spread).
 
 glmark2-es2 rerun (`conformance/results/glmark2-2026-10-28.txt`): every scene had become about 25% slower since 2026-10-26, from Mesa 0070's depth-export clears (0.37 ms per frame). Mesa 0074 keeps the export only for depths other than 0 and 1; most scenes are back within 1-6% of 2026-10-26 and all 32 scenes run (`refract` now sets up its depth render target, 64 FPS). `terrain` reads 34 FPS against 112 on 2026-10-26, but the 2026-10-26 Mesa and kernel module together also give 34 today, so that number is not reproducible. xegpu now places buffers under 1 MB from the top of the pool (hardware rule 36). dEQP full35: 99.9%, no regressions. piglit gl20-25: **1,031 pass, 90.4%** of 1,140 (`tex3d-maxsize` and `security/initialized-fbo` pass).
+
+Mesa 0075 (GLES implementation color read type UNSIGNED_BYTE on big-endian, with the matching glamor change) and 0076 (ir2 packs scalars into shared registers): dEQP full36 **17,060 of 17,075, 99.9%**, ten more than full35 (the eight `shaders.indexing.tmp_array.*_dynamic_loop_read` crashes and two `state_query.integers.implementation_color_read`), no regressions. piglit gl20-26: 1,031, identical. perfcheck: within noise once glamor accepted the new read type (before that, depth 24/32 fell back to software).

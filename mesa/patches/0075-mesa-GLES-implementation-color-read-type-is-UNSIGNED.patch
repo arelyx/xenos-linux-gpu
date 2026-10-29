@@ -1,0 +1,38 @@
+From 9f2fb335fe05faa12363655c1fd41b5f51c07080 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 19:20:39 -0700
+Subject: [PATCH 75/76] mesa: GLES implementation color read type is
+ UNSIGNED_BYTE on big-endian
+
+The big-endian A8R8G8B8 case returned GL_UNSIGNED_INT_8_8_8_8_REV for
+glamor, but that is not an OpenGL ES type (dEQP state_query
+implementation_color_read). Keep it for desktop GL; glamor's GLES
+format check accepts BGRA/UNSIGNED_BYTE on big-endian instead
+(xorg/glamor-be-gles.patch).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/mesa/main/framebuffer.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/mesa/main/framebuffer.c b/src/mesa/main/framebuffer.c
+index 1cade69..acf32ed 100644
+--- a/src/mesa/main/framebuffer.c
++++ b/src/mesa/main/framebuffer.c
+@@ -989,7 +989,10 @@ _mesa_get_color_read_type(struct gl_context *ctx,
+        * which is what glamor asks for (Xbox 360) */
+       if (format == MESA_FORMAT_A8R8G8B8_UNORM || format == MESA_FORMAT_X8R8G8B8_UNORM ||
+           format == MESA_FORMAT_B8G8R8A8_UNORM || format == MESA_FORMAT_B8G8R8X8_UNORM)
+-         return GL_UNSIGNED_INT_8_8_8_8_REV;   /* (any type is converted; this one is glamor's) */
++         /* (any type is converted; this one is glamor's). OpenGL ES has no
++          * 8_8_8_8_REV: BGRA/UNSIGNED_BYTE there (dEQP state_query
++          * implementation_color_read) */
++         return _mesa_is_desktop_gl(ctx) ? GL_UNSIGNED_INT_8_8_8_8_REV : GL_UNSIGNED_BYTE;
+ #endif
+       return _mesa_uncompressed_format_to_type(format);
+    }
+-- 
+2.53.0
+
