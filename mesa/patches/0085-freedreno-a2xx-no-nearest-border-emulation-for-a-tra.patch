@@ -1,0 +1,57 @@
+From ce56248294b25d3c4c33d96d83d64002b51a55af Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 19:52:00 -0700
+Subject: [PATCH] freedreno/a2xx: no nearest border emulation for a transparent
+ black border
+
+glamor's RepeatNone sources use CLAMP_TO_BORDER with (0, 0, 0, 0) and
+nearest filtering. With 0083's emulation the desktop drew black boxes
+and trails when windows moved (seen on the TV; xwd captures of X's
+pixmap looked clean). Leave that case to the hardware, which clamps to
+the edge as before 0083. Other border colors are still emulated.
+
+Bisected with X running each build: 0082 good, 0083 bad; today's Mesa
+with the emulation off good, nearest-only bad.
+
+piglit gl20-39: 1065 pass; all border tests still pass;
+gl-1.0-beginend-coverage failed once and passes on rerun. dEQP 17062/17075:
+texture.size.2d.2048x2048_rgb888_mipmap is now ResourceError with the GPU
+pool at 48 MB (was 80).
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_program.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_program.c b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+index bc9a4a0..1354268 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_program.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_program.c
+@@ -278,7 +278,14 @@ fd2_border_key(struct fd_context *ctx, struct fd2_shader_stateobj *fp, uint8_t k
+          if (wrap[a] == PIPE_TEX_WRAP_MIRROR_CLAMP_TO_BORDER)
+             k |= IR2_BORDER_MIRROR;
+       }
++      const float *c = ss->border_color.f;
+       if (ss->mag_img_filter == PIPE_TEX_FILTER_NEAREST) {
++         /* not for (0, 0, 0, 0): glamor's RepeatNone sources use
++          * CLAMP_TO_BORDER with it, and with the emulation the desktop drew
++          * black boxes and trails when windows moved (2026-10-29); the
++          * hardware clamps to the edge there, as before 0083 */
++         if (c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 0.0f)
++            continue;
+          if (k & IR2_BORDER_AXES)
+             key[i] = k | IR2_BORDER_NEAREST;
+          continue;
+@@ -293,7 +300,6 @@ fd2_border_key(struct fd_context *ctx, struct fd2_shader_stateobj *fp, uint8_t k
+          half |= wrap[a] == PIPE_TEX_WRAP_CLAMP || wrap[a] == PIPE_TEX_WRAP_MIRROR_CLAMP;
+       if (!(k & IR2_BORDER_AXES) && !half)
+          continue;
+-      const float *c = ss->border_color.f;
+       if ((c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f && c[3] == 0.0f) ||
+           (c[0] == 1.0f && c[1] == 1.0f && c[2] == 1.0f && c[3] == 1.0f))
+          continue;
+-- 
+2.53.0
+
