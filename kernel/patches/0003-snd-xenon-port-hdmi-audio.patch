@@ -1,0 +1,159 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] ALSA: snd-xenon: port to 6.18, enable HDMI audio, drop the unused IRQ
+
+Free60's Xbox 360 sound driver (2009) for 6.18:
+- from_timer -> timer_container_of, del_timer_sync -> timer_delete_sync,
+  pci_{alloc,free}_consistent -> dma_{alloc,free}_coherent (outside the
+  spinlock; keep the DMA handle for freeing, the device takes it masked),
+  snd_printk -> dev_err/dev_warn.
+- Reset the DAC through the SMC GPIOs and turn HDMI audio on over the
+  SMC's I2C (module parameter hdmi, default on), as libxenon's
+  xenon_sound_init does. Without it the DMA pointer never moved.
+- Don't request the interrupt: the driver polls on a timer and never
+  acknowledged it, which made an interrupt storm.
+
+Built as a module with CONFIG_SOUND=m, CONFIG_SND=m, CONFIG_SND_PCI=y,
+CONFIG_SND_XENON=m (no change to the kernel image). Playback runs at
+48 kHz (hw_ptr advances ~48000 frames/s); output on the TV not yet heard.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+--- a/sound/pci/snd-xenon.c
++++ b/sound/pci/snd-xenon.c
+@@ -81,7 +81,8 @@
+ 
+ 	int irq;
+ 
+-	dma_addr_t descr_base_phys;
++	dma_addr_t descr_base_phys;	/* as the device takes it (top bits masked) */
++	dma_addr_t descr_base_dma;	/* as dma_alloc_coherent returned it */
+ 	void *descr_base_virt;
+ 
+ 	struct snd_pcm *pcm[2];
+@@ -131,15 +132,9 @@
+ 	return;
+ }
+ 
+-static irqreturn_t snd_xenon_interrupt(int irq, void *dev_id)
+-{
+-	printk("xenon_snd: give me an interrupt, please!\n");
+-	return IRQ_HANDLED;
+-}
+-
+ static void snd_xenon_timer_fn(struct timer_list * t)
+ {
+-	struct snd_xenon *chip = from_timer(chip, t, timer);
++	struct snd_xenon *chip = timer_container_of(chip, t, timer);
+ 
+ 	u32 reg;
+ 	int rptr_descr, wptr_descr, cur_len, size;
+@@ -467,17 +462,64 @@
+ 	return 0;
+ }
+ 
++static bool hdmi = true;
++module_param(hdmi, bool, 0444);
++MODULE_PARM_DESC(hdmi, "Enable audio on the HDMI output (default: true)");
++
++/* SMC GPIO read-modify-write (libxenon xenon_gpio_control) */
++static void xenon_snd_gpio_control(int reg, u32 clear, u32 set)
++{
++	static const int r[] = {0x20, 0x24, 0x28, 0x30, 0x34, 0x38, 0x40, 0x44, 0x48};
++	void __iomem *base = ioremap(0x200ea001000, 0x1000);
++	u32 b = readl(base + r[reg]);
++
++	writel((b & ~clear) | set, base + r[reg]);
++	iounmap(base);
++}
++
++/* SMC I2C write (libxenon xenon_smc_i2c_write), the reply left unread */
++static void xenon_snd_i2c_write(u16 addr, u8 val)
++{
++	unsigned char buf[16] = {0};
++	int ddc = addr >= 0x1d0 && addr <= 0x1f5;
++
++	buf[0] = 0x11;
++	buf[1] = ddc ? 0x21 : 0x20;
++	buf[3] = (addr >= 0x200 ? 0x3d : 0x39) | 0x80;
++	buf[6] = addr & 0xff;
++	buf[7] = val;
++	xenon_smc_send_message(buf);
++	msleep(5);
++}
++
+ static void snd_xenon_init(struct snd_xenon *chip)
+ {
+ 	unsigned long flags;
+ 	static unsigned char smc_snd[32] = {0x8d, 1, 1};
++
++	/* reset the DAC, and turn HDMI audio on, as libxenon's
++	 * xenon_sound_init does */
++	xenon_snd_gpio_control(5, 0x1000, 0x1000);
++	xenon_snd_gpio_control(0, 0x1000, 0x1000);
++	xenon_snd_gpio_control(4, 0x1000, 0x1000);
++	if (hdmi) {
++		static const u16 regs[][2] = {
++			{0x0214, 0x11}, {0x0202, 0x03}, {0x0203, 0x00}, {0x0204, 0x18},
++			{0x0205, 0x00}, {0x021d, 0x40}, {0x0221, 0x02}, {0x0222, 0x2b},
++			{0x022f, 0x01}, {0x023e, 0x3f}, {0x02df, 0x10},
++		};
++		for (int i = 0; i < ARRAY_SIZE(regs); i++)
++			xenon_snd_i2c_write(regs[i][0], regs[i][1]);
++	}
+ 	xenon_smc_send_message(smc_snd);
+ 
+-	spin_lock_irqsave(&chip->lock, flags);
++	/* allocate outside the lock (it may sleep); the device takes the
++	 * address without the top bits, keep the handle for freeing */
++	chip->descr_base_virt = dma_alloc_coherent(&chip->pci->dev,
++			 DESCRIPTOR_BUFFER_SIZE * 2, &chip->descr_base_dma, GFP_KERNEL);
++	chip->descr_base_phys = chip->descr_base_dma & 0x1fffffff;
+ 
+-	chip->descr_base_virt = pci_alloc_consistent(chip->pci,
+-			 DESCRIPTOR_BUFFER_SIZE * 2, &chip->descr_base_phys);
+-	chip->descr_base_phys &= 0x1fffffff;
++	spin_lock_irqsave(&chip->lock, flags);
+ 	printk("snd_xenon: descr_base_virt=0x%llx, descr_base_phys=0x%llx\n",
+ 		(unsigned long long)chip->descr_base_virt,
+ 		(unsigned long long)chip->descr_base_phys);
+@@ -548,20 +590,16 @@
+ 
+ 	printk("snd_xenon: iobase_phys=0x%lx iobase_virt=0x%llx\n", chip->iobase_phys, (unsigned long long)chip->iobase_virt);
+ 
+-	if (request_irq(pci->irq, snd_xenon_interrupt, IRQF_SHARED,
+-			card->shortname, chip)) {
+-		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
+-		snd_xenon_free(chip);
+-		return -EBUSY;
+-	}
+-	chip->irq = pci->irq;
++	/* the driver polls on a timer and never acknowledges the interrupt;
++	 * requesting it only produced an interrupt storm */
++	chip->irq = -1;
+ 	pci_intx(pci, IRQ_ENABLE);
+ 	printk("snd_xenon: irq=%x\n", chip->irq);
+ 
+ 	snd_xenon_init(chip);
+ 
+ 	if ((err = snd_xenon_new_pcm(chip)) < 0) {
+-		snd_printk(KERN_WARNING "Could not to create PCM\n");
++		dev_warn(&pci->dev, "Could not create PCM\n");
+ 		snd_xenon_free(chip);
+ 		return err;
+ 	}
+@@ -599,12 +637,12 @@
+ 	spin_lock_irq(&chip->lock);
+ 	chip->timer_in_use = 0;
+ 	spin_unlock_irq(&chip->lock);
+-	del_timer_sync(&chip->timer);
++	timer_delete_sync(&chip->timer);
+ 
+ 	if (chip->irq >= 0)
+ 		free_irq(chip->irq, chip);
+ 	if (chip->descr_base_virt)
+-		pci_free_consistent(chip->pci, DESCRIPTOR_BUFFER_SIZE * 2, chip->descr_base_virt, chip->descr_base_phys);
++		dma_free_coherent(&chip->pci->dev, DESCRIPTOR_BUFFER_SIZE * 2, chip->descr_base_virt, chip->descr_base_dma);
+ 	if (chip->iobase_virt)
+ 		  iounmap(chip->iobase_virt);
+ 	pci_release_regions(chip->pci);
