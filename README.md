@@ -74,6 +74,7 @@ docs/                setup, hardware rules, methodology, footguns, conformance, 
 ## Docs
 
 - [docs/setup.md](docs/setup.md): netboot, NFS root, softmod patch, building everything
+- [docs/apps.md](docs/apps.md): browsing, video and audio, games: what runs, how to start it, and the memory limits
 - [docs/hardware-rules.md](docs/hardware-rules.md): Xenos vs Adreno 200, with evidence
 - [docs/methodology.md](docs/methodology.md): how to debug a GPU that can't be reset
 - [docs/footguns.md](docs/footguns.md): things that cost us hours
