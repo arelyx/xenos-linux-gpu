@@ -1,0 +1,15 @@
+#!/bin/sh
+# yt-play URL [mpv options]: play a YouTube (or other yt-dlp) video with mpv.
+# yt-dlp resolves the streams (H.264 up to 720p: the CPU decodes it about 2x
+# real time); mpv's own yt-dlp hook gets empty output on this system.
+url="$1"; shift
+fmt="${YT_FMT:-bestvideo[vcodec^=avc1][height<=720][fps<=30]+bestaudio/best[height<=720][fps<=30]}"
+urls=$(yt-dlp --no-warnings -f "$fmt" -g "$url") || exit 1
+title=$(yt-dlp --no-warnings --get-title "$url" 2>/dev/null)
+v=$(echo "$urls" | sed -n 1p); a=$(echo "$urls" | sed -n 2p)
+export DISPLAY=${DISPLAY:-:0} LD_LIBRARY_PATH=/opt/mesa-xenos/lib
+if [ -n "$a" ]; then
+	exec mpv --force-media-title="$title" --audio-file="$a" "$@" "$v"
+else
+	exec mpv --force-media-title="$title" "$@" "$v"
+fi
