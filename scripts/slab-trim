@@ -1,0 +1,11 @@
+#!/bin/sh
+# slab-trim: with 64 KB pages every slab cache keeps per-CPU partial slabs on
+# each of the 6 hardware threads. Turn them off and shrink every cache:
+# 66 -> 52 MB unreclaimable slab, +12 MB available (2026-10-29).
+for d in /sys/kernel/slab/*/; do
+	[ -L "${d%/}" ] && continue
+	echo 0 > "$d/cpu_partial" 2>/dev/null
+	echo 1 > "$d/min_partial" 2>/dev/null
+	echo 1 > "$d/shrink" 2>/dev/null
+done
+exit 0

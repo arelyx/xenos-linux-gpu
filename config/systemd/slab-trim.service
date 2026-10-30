@@ -1,0 +1,10 @@
+[Unit]
+Description=Trim per-CPU slab partials (64 KB pages, 6 threads)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/slab-trim
+
+[Install]
+WantedBy=multi-user.target
