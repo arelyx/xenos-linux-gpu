@@ -128,4 +128,17 @@ The default desktop is IceWM (`config/systemd/icewm-glamor.service`). Xfce fits 
 - `icewm/preferences` (`~/.icewm/preferences`): xterm as IceWM's terminal. xfce4-terminal plus the xfconfd it starts take about 45 MB.
 - cron and rpcbind disabled (the NFS root is mounted with `nolock`, so it doesn't need rpcbind).
 
-Bigger savings would need kernel changes: 4 KB pages instead of 64 KB (every small file, page-table page and partly used allocation costs 64 KB now), `pty.legacy_count=0` or `CONFIG_LEGACY_PTYS=n`, a smaller `coherent_pool` than 16M, and a smaller GPU pool than 48 MB.
+Kernel-side settings now in use: `coherent_pool=6M` (`config/kboot.conf`; at 2M the boot framebuffer didn't fit and the console stayed blank until X), the GPU pool at 48 MB (`config/modprobe/xegpu.conf`; dEQP's 2048x2048 mipmapped texture no longer fits), and `scripts/slab-trim` (`config/systemd/slab-trim.service`), which turns off per-CPU slab partials: unreclaimable slab 66 -> 52 MB on the 64 KB kernel.
+
+### 4 KB-page kernel
+
+A kernel with `CONFIG_PPC_4K_PAGES=y` (and `CONFIG_LEGACY_PTYS` off) leaves about 294 MB available with the desktop, against about 200 MB with 64 KB pages; unreclaimable slab falls to 14 MB. Build it from a separate copy of the tree with the same patches, and package it as `zImage.xenon` does, or Xell can't boot it: the raw vmlinux is ELF64 with a 0xc000000000000000 entry point, and the staged 4K kernel of 10-26 "died early" only because it was that raw file.
+
+```
+xenon-strip -s -R .comment vmlinux -o vmlinux.strip
+xenon-objcopy -O elf32-powerpc vmlinux.strip vmlinux-4k.xenon
+```
+
+Its modules (`xegpu`, `xenon_idle`, sound) go in `/lib/modules/6.18.58-xenon-4k`, built against that tree. Apply `kernel/patches/0002-xenon-vmx-not-advertised.patch` to it too: the first 4K build still advertised AltiVec.
+
+Status (2026-10-30): it passes dEQP (17,062 of 17,075) and piglit like the 64 KB kernel, after Mesa 0086 fixed a ring overrun that 64 KB pages had hidden. But under a full dEQP run it froze the console once (three times before AltiVec was hidden), silently, with nothing on netconsole; the 64 KB kernel doesn't. So the 64 KB kernel stays the default, and `/srv/tftp/vmlinux-4k-elf32` is the 4 KB one: copy it over `/srv/tftp/vmlinux` to boot it. Whether the freezes are the whole console or only its network needs someone watching the TV.

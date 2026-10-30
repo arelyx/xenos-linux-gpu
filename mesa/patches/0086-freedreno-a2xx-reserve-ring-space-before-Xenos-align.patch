@@ -1,0 +1,40 @@
+From 4ffad05d955ebd478a7eafb75324097c5c4c1035 Mon Sep 17 00:00:00 2001
+From: Harshit Gupta <39994376+arelyx@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 04:51:42 -0700
+Subject: [PATCH] freedreno/a2xx: reserve ring space before Xenos alignment
+ padding
+
+fd2_xenos_align pads with bare OUT_RINGs, which don't reserve space, so
+near the end of a ring chunk it wrote past the mapping. With 64 KB pages
+the mapping's rounding hid it; with a 4 KB-page kernel it segfaulted
+(piglit stencil-twoside, tex-miplevel-selection, interstage-limits with
+state changes). BEGIN_RING(ring, 4) first.
+
+On the 4 KB-page kernel: the seven crashes back to their 64 KB results;
+piglit gl20 1065 pass; dEQP 17062/17075, no regressions.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QFJdrUq9L8NDS5PyGFCsG9
+---
+ src/gallium/drivers/freedreno/a2xx/fd2_emit.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+index a40007e..c2a1881 100644
+--- a/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
++++ b/src/gallium/drivers/freedreno/a2xx/fd2_emit.c
+@@ -41,6 +41,10 @@ bool fd2_xenos;   /* set by fd2_screen_init on Xbox 360 */
+ void
+ fd2_xenos_align(struct fd_ringbuffer *ring, unsigned rem)
+ {
++   /* the padding is bare OUT_RINGs: reserve room for it, or near the end
++    * of a ring chunk it writes past the mapping (hidden by the rounding of
++    * 64 KB pages; a segfault with 4 KB pages, piglit stencil-twoside) */
++   BEGIN_RING(ring, 4);
+    while (((ring->cur - ring->start) & 3) != rem)
+       OUT_RING(ring, 0x80000000);
+ }
+-- 
+2.53.0
+
